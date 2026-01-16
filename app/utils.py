@@ -6,8 +6,8 @@ Provides reusable functions with comprehensive error handling.
 from datetime import datetime, timezone
 from typing import Union
 
-
 # ============= TIME UTILITIES =============
+
 
 def get_current_time() -> str:
     """
@@ -21,10 +21,8 @@ def get_current_time() -> str:
 
 # ============= MATHEMATICAL OPERATIONS =============
 
-def add_numbers(
-    a: Union[int, float],
-    b: Union[int, float]
-) -> Union[int, float]:
+
+def add_numbers(a: Union[int, float], b: Union[int, float]) -> Union[int, float]:
     """
     Add two numbers together.
 
@@ -49,10 +47,7 @@ def add_numbers(
     return a + b
 
 
-def subtract_numbers(
-    a: Union[int, float],
-    b: Union[int, float]
-) -> Union[int, float]:
+def subtract_numbers(a: Union[int, float], b: Union[int, float]) -> Union[int, float]:
     """
     Subtract two numbers.
 
@@ -77,10 +72,7 @@ def subtract_numbers(
     return a - b
 
 
-def multiply_numbers(
-    a: Union[int, float],
-    b: Union[int, float]
-) -> Union[int, float]:
+def multiply_numbers(a: Union[int, float], b: Union[int, float]) -> Union[int, float]:
     """
     Multiply two numbers.
 
@@ -105,10 +97,7 @@ def multiply_numbers(
     return a * b
 
 
-def divide_numbers(
-    a: Union[int, float],
-    b: Union[int, float]
-) -> Union[int, float]:
+def divide_numbers(a: Union[int, float], b: Union[int, float]) -> Union[int, float]:
     """
     Divide two numbers with zero-check.
 
@@ -138,6 +127,7 @@ def divide_numbers(
 
 # ============= NUMBER PROPERTIES =============
 
+
 def even_parity(n: int) -> bool:
     """
     Determine if a number has even parity or not.
@@ -161,7 +151,7 @@ def even_parity(n: int) -> bool:
         raise ValueError("Input must be an integer")
     count = 0
     for bit in bin(n)[2:]:
-        if bit == '1':
+        if bit == "1":
             count += 1
     return not count & 1
 
