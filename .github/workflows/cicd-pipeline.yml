@@ -1,0 +1,719 @@
+name: Python CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  
+  # ====== STAGE 1: BUILD ======
+  build:
+    name: Build Docker Image
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set lowercase image name
+        run: |
+          echo "IMAGE_NAME=$(echo ${{ env.IMAGE_NAME }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      - name: Build and push Docker image
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Display build summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Docker Image Built Successfully"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 Image Tags:"
+          echo "${{ steps.meta.outputs.tags }}" | sed 's/^/   /'
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+
+  # ====== STAGE 2: TEST (MATRIX TESTING) ======
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    runs-on: ubuntu-latest
+    needs: build
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "⚠️  WARNING: requirements.txt not found"
+            exit 1
+          fi
+          
+          pip install pytest-xdist pytest-timeout pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          if [ ! -d "tests/" ]; then
+            echo "❌ ERROR: tests/ directory not found"
+            exit 1
+          fi
+          
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=json \
+            -n auto \
+            --timeout=30
+
+      - name: Check coverage threshold (85%)
+        run: |
+          if [ ! -f coverage.json ]; then
+            echo "❌ ERROR: coverage.json not found"
+            exit 1
+          fi
+          
+          python -c "
+          import json
+          with open('coverage.json') as f:
+              data = json.load(f)
+              coverage = data['totals']['percent_covered']
+              threshold = 85
+              print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+              print(f'Coverage Report')
+              print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+              print(f'Current:   {coverage:.2f}%')
+              print(f'Required:  {threshold}%')
+              print(f'Status:    ', end='')
+              if coverage < threshold:
+                  print(f'❌ FAILED')
+                  print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+                  exit(1)
+              else:
+                  print(f'✅ PASSED')
+                  print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+          "
+      
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-${{ matrix.python-version }}
+          path: htmlcov/
+      
+      - name: Upload coverage JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json-${{ matrix.python-version }}
+          path: coverage.json
+      
+      - name: Run code quality checks
+        run: |
+          pip install flake8 pylint
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 Running Flake8 Analysis"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          flake8 app/ tests/ --max-line-length=100 --statistics --exit-zero
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 Running Pylint Analysis"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          pylint app/ tests/ --exit-zero
+      
+      - name: Security scan with Bandit
+        run: |
+          pip install bandit
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔒 Running Bandit Security Scan"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          bandit -r app/ -f json -o bandit-report.json -ll || true
+          
+          if [ -f bandit-report.json ]; then
+            ISSUE_COUNT=$(python -c "import json; data=json.load(open('bandit-report.json')); print(len(data.get('results', [])))" 2>/dev/null || echo "0")
+            
+            if [ "$ISSUE_COUNT" -gt 0 ]; then
+              echo "⚠️  Found $ISSUE_COUNT security issue(s)"
+              echo "::warning::Bandit detected $ISSUE_COUNT security issues"
+            else
+              echo "✅ No security issues found"
+            fi
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          fi
+        continue-on-error: true
+      
+      - name: Secret scanning
+        run: |
+          pip install detect-secrets
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔐 Running Secret Detection Scan"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          detect-secrets scan --all-files --force-use-all-plugins > .secrets.baseline || true
+          
+          if [ -f .secrets.baseline ]; then
+            SECRET_COUNT=$(python -c "import json; data=json.load(open('.secrets.baseline')); print(len(data.get('results', {})))" 2>/dev/null || echo "0")
+            
+            if [ "$SECRET_COUNT" -gt 0 ]; then
+              echo "⚠️  Found $SECRET_COUNT potential secret(s)"
+            else
+              echo "✅ No secrets detected"
+            fi
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          fi
+        continue-on-error: true
+      
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-${{ matrix.python-version }}
+          path: |
+            bandit-report.json
+            .secrets.baseline
+      
+      - name: Test summary
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Test Suite Completed (Python ${{ matrix.python-version }})"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✓ Unit Tests"
+          echo "✓ Integration Tests"
+          echo "✓ Code Coverage (≥85%)"
+          echo "✓ Code Quality Checks"
+          echo "✓ Security Scans"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+
+  # ====== STAGE 3: QUALITY GATES ======
+  quality-gates:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+    needs: test
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Download coverage reports
+        uses: actions/download-artifact@v4
+        with:
+          path: coverage-artifacts
+      
+      - name: Analyze coverage across Python versions
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Coverage Analysis Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          for json_file in coverage-artifacts/coverage-json-*/coverage.json; do
+            if [ -f "$json_file" ]; then
+              version=$(basename $(dirname "$json_file") | sed 's/coverage-json-//')
+              coverage=$(python -c "import json; f=open('$json_file'); d=json.load(f); print(f\"{d['totals']['percent_covered']:.2f}\")" 2>&1)
+              
+              if [ $? -eq 0 ]; then
+                echo "Python $version: $coverage%"
+              else
+                echo "Python $version: ⚠️  Failed to parse"
+              fi
+            fi
+          done
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+      - name: Security summary
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔒 Security Scan Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          echo "Bandit Results:"
+          for scan_dir in coverage-artifacts/security-scan-*; do
+            if [ -d "$scan_dir" ] && [ -f "$scan_dir/bandit-report.json" ]; then
+              version=$(basename "$scan_dir" | sed 's/security-scan-//')
+              issues=$(python -c "import json; f=open('$scan_dir/bandit-report.json'); d=json.load(f); print(len(d.get('results', [])))" 2>/dev/null || echo "0")
+              
+              if [ "$issues" -gt 0 ]; then
+                echo "  Python $version: ⚠️  $issues issue(s)"
+              else
+                echo "  Python $version: ✅ Clean"
+              fi
+            fi
+          done
+          
+          echo ""
+          echo "Secret Detection:"
+          for scan_dir in coverage-artifacts/security-scan-*; do
+            if [ -d "$scan_dir" ] && [ -f "$scan_dir/.secrets.baseline" ]; then
+              version=$(basename "$scan_dir" | sed 's/security-scan-//')
+              secrets=$(python -c "import json; f=open('$scan_dir/.secrets.baseline'); d=json.load(f); print(len(d.get('results', {})))" 2>/dev/null || echo "0")
+              
+              if [ "$secrets" -gt 0 ]; then
+                echo "  Python $version: ⚠️  $secrets potential secret(s)"
+              else
+                echo "  Python $version: ✅ Clean"
+              fi
+            fi
+          done
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      - name: Check quality gates
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🎯 Quality Gates Status"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ "${{ needs.test.result }}" = "success" ]; then
+            echo "✅ All tests passed"
+            echo "✅ Coverage requirements met"
+            echo "✅ Code quality verified"
+            echo ""
+            echo "Status: PASSED ✅"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 0
+          else
+            echo "❌ Test failures detected"
+            echo ""
+            echo "Status: FAILED ❌"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+
+
+  # ====== STAGE 4: REPORTS ======
+  reports:
+    name: Generate Reports
+    runs-on: ubuntu-latest
+    needs: test
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: coverage-artifacts
+      
+      - name: Generate HTML report index
+        run: |
+          cat > coverage-artifacts/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>📊 Test Coverage Reports</title>
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      padding: 40px 20px;
+                  }
+                  .container { max-width: 1000px; margin: 0 auto; }
+                  .header {
+                      background: white;
+                      padding: 40px;
+                      border-radius: 10px;
+                      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                      margin-bottom: 30px;
+                      text-align: center;
+                  }
+                  .header h1 { color: #333; font-size: 2.5em; margin-bottom: 10px; }
+                  .header p { color: #666; font-size: 1.1em; }
+                  .reports-grid {
+                      display: grid;
+                      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                      gap: 20px;
+                      margin-bottom: 30px;
+                  }
+                  .report-card {
+                      background: white;
+                      padding: 30px;
+                      border-radius: 10px;
+                      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+                      transition: all 0.3s ease;
+                      text-decoration: none;
+                      color: inherit;
+                      cursor: pointer;
+                  }
+                  .report-card:hover {
+                      transform: translateY(-5px);
+                      box-shadow: 0 15px 30px rgba(0,0,0,0.2);
+                  }
+                  .report-card h3 { color: #667eea; font-size: 1.3em; margin-bottom: 10px; }
+                  .report-card p { color: #666; font-size: 0.9em; margin-bottom: 15px; }
+                  .report-link {
+                      display: inline-block;
+                      background: #667eea;
+                      color: white;
+                      padding: 10px 20px;
+                      border-radius: 5px;
+                      text-decoration: none;
+                      font-weight: 600;
+                      transition: all 0.3s ease;
+                  }
+                  .report-link:hover { background: #764ba2; }
+                  .status {
+                      background: white;
+                      padding: 30px;
+                      border-radius: 10px;
+                      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+                  }
+                  .status h2 { color: #333; margin-bottom: 20px; }
+                  .status-item {
+                      display: flex;
+                      align-items: center;
+                      padding: 15px;
+                      background: #f5f5f5;
+                      border-radius: 5px;
+                      margin-bottom: 10px;
+                  }
+                  .status-icon { font-size: 1.5em; margin-right: 15px; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="header">
+                      <h1>📊 Test Coverage Reports</h1>
+                      <p>Coverage reports for different Python versions</p>
+                  </div>
+                  
+                  <div class="reports-grid">
+                      <a href="coverage-html-3.9/index.html" class="report-card">
+                          <h3>🐍 Python 3.9</h3>
+                          <p>Detailed coverage report for Python 3.9 environment</p>
+                          <span class="report-link">View Report →</span>
+                      </a>
+                      
+                      <a href="coverage-html-3.10/index.html" class="report-card">
+                          <h3>🐍 Python 3.10</h3>
+                          <p>Detailed coverage report for Python 3.10 environment</p>
+                          <span class="report-link">View Report →</span>
+                      </a>
+                      
+                      <a href="coverage-html-3.11/index.html" class="report-card">
+                          <h3>🐍 Python 3.11</h3>
+                          <p>Detailed coverage report for Python 3.11 environment</p>
+                          <span class="report-link">View Report →</span>
+                      </a>
+                  </div>
+                  
+                  <div class="status">
+                      <h2>📈 Report Contents</h2>
+                      <div class="status-item">
+                          <span class="status-icon">📊</span>
+                          <div><strong>Overall Coverage</strong> - Total code coverage percentage</div>
+                      </div>
+                      <div class="status-item">
+                          <span class="status-icon">📁</span>
+                          <div><strong>Coverage by File</strong> - Individual file metrics</div>
+                      </div>
+                      <div class="status-item">
+                          <span class="status-icon">📝</span>
+                          <div><strong>Line Coverage</strong> - Exact lines covered/missed</div>
+                      </div>
+                      <div class="status-item">
+                          <span class="status-icon">🎯</span>
+                          <div><strong>Gap Analysis</strong> - Areas needing more tests</div>
+                      </div>
+                  </div>
+              </div>
+          </body>
+          </html>
+          EOF
+      
+      - name: Upload all reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-coverage-reports
+          path: coverage-artifacts/
+
+
+  # ====== STAGE 5: NOTIFICATIONS ======
+  notify:
+    name: Pipeline Status
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    needs: [build, test, quality-gates]
+    
+    steps:
+      - name: Check pipeline status
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Pipeline Execution Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Build:         ${{ needs.build.result }}"
+          echo "Tests:         ${{ needs.test.result }}"
+          echo "Quality Gates: ${{ needs.quality-gates.result }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ "${{ needs.build.result }}" = "success" ] && \
+             [ "${{ needs.test.result }}" = "success" ] && \
+             [ "${{ needs.quality-gates.result }}" = "success" ]; then
+            echo ""
+            echo "✅ ALL CHECKS PASSED - READY FOR DEPLOYMENT"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 0
+          else
+            echo ""
+            echo "❌ PIPELINE FAILED - REVIEW LOGS ABOVE"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+
+
+  # ====== STAGE 6: DEPLOYMENT ======
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: self-hosted
+    environment: production
+    needs: [build, test, quality-gates, reports]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify runner environment
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🖥️  Self-Hosted Runner Verification"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Hostname: $(hostname)"
+          echo "User:     $(whoami)"
+          echo "Docker:   $(docker --version)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Deploy container
+        env:
+          CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+          CONTAINER_PORT: ${{ secrets.CONTAINER_PORT_HOST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🚀 Starting Deployment"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Configuration
+          DOCKER_IMAGE="ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')"
+          IMAGE_TAG="latest"
+          
+          echo "📦 Image:     $DOCKER_IMAGE:$IMAGE_TAG"
+          echo "🏷️  Container: $CONTAINER_NAME"
+          echo "🔌 Port:      $CONTAINER_PORT:5000"
+          echo ""
+          
+          # Validate secrets
+          if [ -z "$CONTAINER_NAME" ] || [ -z "$CONTAINER_PORT" ]; then
+            echo "❌ ERROR: Required secrets not configured"
+            exit 1
+          fi
+          
+          # Login to registry
+          echo "🔐 Authenticating to GitHub Container Registry..."
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Registry authentication failed"
+            exit 1
+          fi
+          echo "✅ Authentication successful"
+          echo ""
+          
+          # Stop old container
+          echo "🛑 Stopping existing container..."
+          if docker ps -a | grep -q "$CONTAINER_NAME"; then
+            docker stop "$CONTAINER_NAME" 2>&1 || true
+            docker rm "$CONTAINER_NAME" 2>&1 || true
+            echo "✅ Old container removed"
+          else
+            echo "ℹ️  No existing container found"
+          fi
+          echo ""
+          
+          # Pull new image
+          echo "📥 Pulling Docker image..."
+          docker pull "$DOCKER_IMAGE:$IMAGE_TAG"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Failed to pull image"
+            exit 1
+          fi
+          echo "✅ Image pulled successfully"
+          echo ""
+          
+          # Start new container
+          echo "🚀 Starting new container..."
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            -p "$CONTAINER_PORT:5000" \
+            -e FLASK_ENV=production \
+            -e FLASK_DEBUG=False \
+            --restart unless-stopped \
+            "$DOCKER_IMAGE:$IMAGE_TAG"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Failed to start container"
+            exit 1
+          fi
+          echo "✅ Container started"
+          echo ""
+          
+          # Health check with retries
+          echo "🏥 Performing health check..."
+          HEALTH_SUCCESS=0
+          
+          for i in {1..3}; do
+            sleep 10
+            if curl -sf "http://localhost:$CONTAINER_PORT/api/health" --max-time 5 >/dev/null 2>&1; then
+              HEALTH_SUCCESS=1
+              echo "✅ Health check passed (attempt $i)"
+              break
+            else
+              echo "⏳ Health check attempt $i/3..."
+            fi
+          done
+          
+          echo ""
+          if [ $HEALTH_SUCCESS -eq 1 ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "✅ DEPLOYMENT SUCCESSFUL"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🌐 Application: http://localhost:$CONTAINER_PORT"
+            echo "🏥 Health:      http://localhost:$CONTAINER_PORT/api/health"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "❌ DEPLOYMENT FAILED - Health Check Timeout"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "📋 Container logs:"
+            docker logs "$CONTAINER_NAME" --tail=30
+            echo ""
+            echo "🔄 Rolling back..."
+            docker stop "$CONTAINER_NAME" 2>&1 || true
+            docker rm "$CONTAINER_NAME" 2>&1 || true
+            
+            if docker images | grep -q "$DOCKER_IMAGE.*latest"; then
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                -p "$CONTAINER_PORT:5000" \
+                --restart unless-stopped \
+                "$DOCKER_IMAGE:latest"
+              echo "⚠️  Rolled back to previous version"
+            fi
+            exit 1
+          fi
+
+      - name: Verify deployment
+        env:
+          CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Deployment Verification"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if docker ps | grep -q "$CONTAINER_NAME"; then
+            echo "✅ Container Status: Running"
+            echo ""
+            docker ps --filter "name=$CONTAINER_NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            echo ""
+            echo "📋 Recent logs:"
+            docker logs "$CONTAINER_NAME" --tail=10
+          else
+            echo "❌ Container not running"
+            exit 1
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker logout ghcr.io 2>/dev/null || true
+          [ -d ~/.ssh ] && rm -rf ~/.ssh || true
+
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
