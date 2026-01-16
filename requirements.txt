@@ -1,0 +1,78 @@
+# ==========================================
+# CORE FRAMEWORK
+# ==========================================
+
+# Flask Web Framework
+Flask>=3.1.2
+
+# CORS support for Flask applications
+Flask-Cors>=6.0.2
+
+# WSGI HTTP Server
+Werkzeug>=3.1.4
+
+
+# ==========================================
+# TESTING DEPENDENCIES
+# ==========================================
+
+# Testing framework
+pytest>=8.4.2
+
+# Code coverage reporting
+pytest-cov>=7.0.0
+
+# Parallel test execution
+pytest-xdist>=2.0.0
+
+# Test timeout handling
+pytest-timeout>=1.4.0
+
+
+# ==========================================
+# CODE QUALITY & ANALYSIS
+# ==========================================
+
+# Code complexity analyzer
+radon>=5.0.1
+
+# Dead code detector
+vulture>=2.9
+
+# Code linting and style checking
+flake8>=7.0.0
+
+# Advanced Python linter
+pylint>=3.3.9
+
+# Security vulnerability scanning
+bandit>=1.8.6
+
+# ==========================================
+# PERFORMANCE & LOAD TESTING
+# ==========================================
+
+# Load testing framework
+locust>=2.30.0
+
+
+# ==========================================
+# UTILITIES
+# ==========================================
+
+# Environment variable management
+python-dotenv>=1.2.0
+
+# HTTP requests library (for health checks)
+requests>=2.32.2
+
+# Enhanced Python shell (optional) - Python 3.9 compatible
+ipython>=8.12.3
+
+
+# ==========================================
+# PRODUCTION DEPENDENCIES (Optional)
+# ==========================================
+
+# Production WSGI server (uncomment if deploying)
+gunicorn>=21.2.0

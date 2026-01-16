@@ -1,0 +1,72 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+Documentation/
+Docs/
+
+# Version control
+.github
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+*.egg
+.Python
+dist
+build
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+
+*.egg-info
+
+# IDE and editor files
+.vscode
+.idea
+.sublime-project
+.sublime-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test coverage
+htmlcov
+.coverage
+.pytest_cache
+.tox
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.log
+*.pid
+
+# OS files
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SSH keys and secrets
+*.pem
+*.key
+deploy_key
+deploy_key.pub
+
+# Node modules (if using any frontend tools)
+node_modules
+npm-debug.log
