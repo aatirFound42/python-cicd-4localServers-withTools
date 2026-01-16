@@ -1,0 +1,67 @@
+version: 2
+updates:
+  # Security updates for pip (daily)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "security"
+    labels:
+      - "dependencies"
+      - "security"
+      - "priority-high"
+  
+  # Regular pip dependency updates (weekly)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+    versioning-strategy: increase
+    # Remove reviewers or replace with actual GitHub usernames/teams
+    # reviewers:
+    #   - "your-github-username"
+    #   - "yourorg/your-team"
+    labels:
+      - "dependencies"
+      - "python"
+  
+  # GitHub Actions updates (weekly)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "ci-cd"
+  
+  # Docker updates (weekly)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "infrastructure"

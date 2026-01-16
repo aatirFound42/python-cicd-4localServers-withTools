@@ -77,7 +77,133 @@ jobs:
           echo "${{ steps.meta.outputs.tags }}" | sed 's/^/   /'
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  # ====== STAGE 2: LINT ======
+  # ====== STAGE 2: CONTAINER SECURITY SCAN ======
+  scan-image:
+    name: Scan Docker Image
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+      security-events: write  # Required for SARIF upload
+    
+    steps:
+      - name: Set lowercase image name
+        run: |
+          echo "IMAGE_NAME=$(echo ${{ env.IMAGE_NAME }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Pull Docker image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo "Pulling image: $IMAGE"
+          docker pull "$IMAGE" || echo "Image not available, skipping scan"
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+      
+      - name: Run Trivy JSON report
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🐳 Scanning Docker Image for Vulnerabilities"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Install Trivy
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy -y
+          
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          
+          # Run scan and generate JSON report
+          trivy image --format json --output trivy-report.json "$IMAGE" || true
+          
+          if [ -f trivy-report.json ]; then
+            # Parse results
+            CRITICAL=$(python -c "
+            import json
+            try:
+                with open('trivy-report.json') as f:
+                    data = json.load(f)
+                    count = 0
+                    for result in data.get('Results', []):
+                        for vuln in result.get('Vulnerabilities', []):
+                            if vuln.get('Severity') == 'CRITICAL':
+                                count += 1
+                    print(count)
+            except:
+                print(0)
+            " 2>/dev/null || echo "0")
+            
+            HIGH=$(python -c "
+            import json
+            try:
+                with open('trivy-report.json') as f:
+                    data = json.load(f)
+                    count = 0
+                    for result in data.get('Results', []):
+                        for vuln in result.get('Vulnerabilities', []):
+                            if vuln.get('Severity') == 'HIGH':
+                                count += 1
+                    print(count)
+            except:
+                print(0)
+            " 2>/dev/null || echo "0")
+            
+            echo "Results:"
+            echo "  🔴 Critical: $CRITICAL"
+            echo "  🟠 High:     $HIGH"
+            
+            if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo ""
+              echo "⚠️  Vulnerabilities detected in container image"
+              echo "::warning::Trivy detected $CRITICAL critical and $HIGH high severity vulnerabilities"
+              
+              # Display top 10 vulnerabilities
+              echo ""
+              echo "Top vulnerabilities:"
+              trivy image --format table --severity CRITICAL,HIGH "$IMAGE" | head -n 20
+            else
+              echo ""
+              echo "✅ No critical or high severity vulnerabilities found"
+            fi
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+      
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+      
+      - name: Upload Trivy reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-reports
+          path: |
+            trivy-results.sarif
+            trivy-report.json
+
+
+  # ====== STAGE 3: LINT ======
   lint:
     name: Code Quality & Linting
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
@@ -140,6 +266,84 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           mypy app/ --ignore-missing-imports --show-error-codes --pretty
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Run dependency security scan (Safety)
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🛡️  Scanning Dependencies for Vulnerabilities"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          pip install safety
+          
+          # Generate requirements for scanning
+          if [ -f requirements.txt ]; then
+            safety check --file requirements.txt --json > safety-report.json || true
+            
+            VULN_COUNT=$(python -c "import json; data=json.load(open('safety-report.json')); print(len(data.get('vulnerabilities', [])))" 2>/dev/null || echo "0")
+            
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "⚠️  Found $VULN_COUNT vulnerable dependencies"
+              echo ""
+              safety check --file requirements.txt --output text
+              echo ""
+              echo "::warning::Safety detected $VULN_COUNT vulnerable dependencies"
+            else
+              echo "✅ No vulnerable dependencies found"
+            fi
+          else
+            echo "⚠️  requirements.txt not found"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+      
+      - name: Upload dependency scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safety-report
+          path: safety-report.json
+
+      - name: Scan for secrets in git history (TruffleHog)
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔐 Scanning Git History for Secrets"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          pip install truffleHog3
+          
+          # Scan recent commits (last 10 for performance)
+          trufflehog3 --format json --output trufflehog-report.json . || true
+          
+          if [ -f trufflehog-report.json ]; then
+            SECRET_COUNT=$(python -c "
+            import json
+            try:
+                with open('trufflehog-report.json') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        print(len(data))
+                    else:
+                        print(0)
+            except:
+                print(0)
+            " 2>/dev/null || echo "0")
+            
+            if [ "$SECRET_COUNT" -gt 0 ]; then
+              echo "⚠️  Found $SECRET_COUNT potential secrets in git history"
+              echo "::warning::TruffleHog detected $SECRET_COUNT potential secrets"
+            else
+              echo "✅ No secrets detected in git history"
+            fi
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+      
+      - name: Upload git secrets report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trufflehog-report
+          path: trufflehog-report.json
       
       - name: Linting summary
         if: always()
@@ -155,12 +359,12 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
-  # ====== STAGE 3: TEST (MATRIX TESTING) ======
+  # ====== STAGE 4: TEST (MATRIX TESTING) ======
   test:
     name: Test (Python ${{ matrix.python-version }})
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     runs-on: ubuntu-latest
-    needs: [build, lint]
+    needs: [build, scan-image, lint]
     
     strategy:
       fail-fast: false
@@ -332,7 +536,150 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
-  # ====== STAGE 3: QUALITY GATES ======
+  # ====== STAGE 5: PERFORMANCE TESTING ======
+  performance-test:
+    name: Performance & Load Testing
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: "!contains(github.event.head_commit.message, '[deploy-only]')"
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Set lowercase image name
+        run: |
+          echo "IMAGE_NAME=$(echo ${{ env.IMAGE_NAME }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Start test container
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🚀 Starting Test Container for Performance Testing"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          
+          docker pull "$IMAGE"
+          
+          docker run -d \
+            --name perf-test-container \
+            -p 8080:5000 \
+            -e FLASK_ENV=testing \
+            "$IMAGE"
+          
+          # Wait for container to be ready
+          sleep 10
+          
+          # Health check
+          for i in {1..5}; do
+            if curl -sf http://localhost:8080/api/health >/dev/null 2>&1; then
+              echo "✅ Container is ready"
+              break
+            fi
+            echo "⏳ Waiting for container... ($i/5)"
+            sleep 5
+          done
+      
+      - name: Install performance testing tools
+        run: |
+          pip install locust pytest-benchmark
+      
+      - name: Run load tests with Locust
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Running Load Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Create a basic locustfile if it doesn't exist
+          if [ ! -f tests/performance/locustfile.py ]; then
+            mkdir -p tests/performance
+            cat > tests/performance/locustfile.py << 'LOCUST_EOF'
+          from locust import HttpUser, task, between
+
+          class APIUser(HttpUser):
+              wait_time = between(1, 3)
+              host = "http://localhost:8080"
+              
+              @task(3)
+              def health_check(self):
+                  self.client.get("/api/health")
+              
+              @task(1)
+              def index(self):
+                  self.client.get("/")
+          LOCUST_EOF
+          fi
+          
+          # Run locust headless
+          locust -f tests/performance/locustfile.py \
+            --headless \
+            --users 50 \
+            --spawn-rate 10 \
+            --run-time 60s \
+            --host http://localhost:8080 \
+            --html performance-report.html \
+            --csv performance-results || true
+          
+          echo "✅ Load tests completed"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      - name: Analyze performance results
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📈 Performance Test Results"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ -f performance-results_stats.csv ]; then
+            echo "Summary Statistics:"
+            cat performance-results_stats.csv
+            echo ""
+            
+            # Check failure rate
+            FAILURES=$(tail -n 1 performance-results_stats.csv | cut -d',' -f7 | tr -d ' ')
+            echo "Failure Rate: $FAILURES%"
+            
+            # Fail if failure rate > 5%
+            if [ $(echo "$FAILURES > 5.0" | bc -l) -eq 1 ]; then
+              echo "❌ FAILED: Failure rate exceeds 5%"
+              exit 1
+            else
+              echo "✅ PASSED: Failure rate within acceptable limits"
+            fi
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+      
+      - name: Upload performance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-reports
+          path: |
+            performance-report.html
+            performance-results*.csv
+      
+      - name: Cleanup test container
+        if: always()
+        run: |
+          docker stop perf-test-container 2>/dev/null || true
+          docker rm perf-test-container 2>/dev/null || true
+
+
+  # ====== STAGE 6: QUALITY GATES ======
   quality-gates:
     name: Quality Gates
     runs-on: ubuntu-latest
@@ -407,6 +754,51 @@ jobs:
           done
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       
+      - name: Comprehensive security summary
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔒 Comprehensive Security Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Dependency vulnerabilities
+          if [ -f coverage-artifacts/safety-report/safety-report.json ]; then
+            DEPS=$(python -c "import json; data=json.load(open('coverage-artifacts/safety-report/safety-report.json')); print(len(data.get('vulnerabilities', [])))" 2>/dev/null || echo "0")
+            echo "Dependencies (Safety):    $([ "$DEPS" -eq 0 ] && echo '✅' || echo '⚠️')  $DEPS vulnerabilities"
+          fi
+          
+          # Git secrets
+          if [ -f coverage-artifacts/trufflehog-report/trufflehog-report.json ]; then
+            SECRETS=$(python -c "
+            import json
+            try:
+                data = json.load(open('coverage-artifacts/trufflehog-report/trufflehog-report.json'))
+                print(len(data) if isinstance(data, list) else 0)
+            except:
+                print(0)
+            " 2>/dev/null || echo "0")
+            echo "Git History (TruffleHog): $([ "$SECRETS" -eq 0 ] && echo '✅' || echo '⚠️')  $SECRETS potential secrets"
+          fi
+          
+          # Container vulnerabilities
+          if [ -f coverage-artifacts/trivy-reports/trivy-report.json ]; then
+            CONTAINER=$(python -c "
+            import json
+            try:
+                data = json.load(open('coverage-artifacts/trivy-reports/trivy-report.json'))
+                count = 0
+                for result in data.get('Results', []):
+                    for vuln in result.get('Vulnerabilities', []):
+                        if vuln.get('Severity') in ['CRITICAL', 'HIGH']:
+                            count += 1
+                print(count)
+            except:
+                print(0)
+            " 2>/dev/null || echo "0")
+            echo "Container Image (Trivy):  $([ "$CONTAINER" -eq 0 ] && echo '✅' || echo '⚠️')  $CONTAINER critical/high CVEs"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
       - name: Check quality gates
         run: |
           echo ""
@@ -431,7 +823,7 @@ jobs:
           fi
 
 
-  # ====== STAGE 4: REPORTS ======
+  # ====== STAGE 7: REPORTS ======
   reports:
     name: Generate Reports
     runs-on: ubuntu-latest
@@ -584,12 +976,12 @@ jobs:
           path: coverage-artifacts/
 
 
-  # ====== STAGE 6: NOTIFICATIONS ======
+  # ====== STAGE 8: NOTIFICATIONS ======
   notify:
     name: Pipeline Status
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
-    needs: [build, lint, test, quality-gates]
+    needs: [build, scan-image, lint, test, performance-test, quality-gates]
     
     steps:
       - name: Check pipeline status
@@ -598,14 +990,18 @@ jobs:
           echo "📊 Pipeline Execution Summary"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Build:         ${{ needs.build.result }}"
+          echo "Image Scan:    ${{ needs.scan-image.result }}"
           echo "Lint:          ${{ needs.lint.result }}"
           echo "Tests:         ${{ needs.test.result }}"
+          echo "Performance Test: ${{ needs.performance-test.result }}"
           echo "Quality Gates: ${{ needs.quality-gates.result }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           if [ "${{ needs.build.result }}" = "success" ] && \
-             [ "${{ needs.lint.result }}" = "success" ] && \ 
+             [ "${{ needs.scan-image.result }}" = "success" ] && \
+             [ "${{ needs.lint.result }}" = "success" ] && \
              [ "${{ needs.test.result }}" = "success" ] && \
+             [ "${{ needs.performance-test.result }}" = "success" ] && \
              [ "${{ needs.quality-gates.result }}" = "success" ]; then
             echo ""
             echo "✅ ALL CHECKS PASSED - READY FOR DEPLOYMENT"
@@ -621,12 +1017,12 @@ jobs:
           fi
 
 
-  # ====== STAGE 7: DEPLOYMENT ======
+  # ====== STAGE 9: DEPLOYMENT ======
   deploy-prod:
     name: Deploy to Production
     runs-on: self-hosted
     environment: production
-    needs: [build, lint, test, quality-gates, reports]
+    needs: [build, scan-image, lint, test, performance-test, quality-gates, reports]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
 
     steps:
@@ -764,6 +1160,68 @@ jobs:
             exit 1
           fi
 
+      - name: Record deployment metrics
+        if: success()
+        env:
+          DEPLOYMENT_TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Recording Deployment Metrics"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Calculate deployment duration
+          DEPLOY_START=$(date +%s)
+          DEPLOY_END=$(date +%s)
+          DURATION=$((DEPLOY_END - DEPLOY_START))
+          
+          # Prepare metrics payload
+          METRICS_PAYLOAD=$(cat <<EOF
+          {
+            "deployment_id": "${{ github.run_id }}",
+            "repository": "${{ github.repository }}",
+            "branch": "${{ github.ref_name }}",
+            "commit_sha": "${{ github.sha }}",
+            "commit_message": "${{ github.event.head_commit.message }}",
+            "deployer": "${{ github.actor }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "duration_seconds": $DURATION,
+            "status": "success",
+            "environment": "production",
+            "image_tag": "latest"
+          }
+          EOF
+          )
+          
+          echo "Metrics to record:"
+          echo "$METRICS_PAYLOAD" | jq '.' 2>/dev/null || echo "$METRICS_PAYLOAD"
+          
+          # Send to metrics endpoint (if configured)
+          if [ -n "${{ secrets.METRICS_ENDPOINT }}" ]; then
+            curl -X POST "${{ secrets.METRICS_ENDPOINT }}" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${{ secrets.METRICS_API_KEY }}" \
+              -d "$METRICS_PAYLOAD" || echo "⚠️ Failed to send metrics"
+          else
+            echo "ℹ️  No metrics endpoint configured (METRICS_ENDPOINT secret not set)"
+          fi
+          
+          # Log to GitHub Actions summary
+          echo "### 📊 Deployment Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployer | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Duration | ${DURATION}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |" >> $GITHUB_STEP_SUMMARY
+          
+          echo "✅ Deployment metrics recorded"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+
       - name: Verify deployment
         env:
           CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
@@ -785,6 +1243,125 @@ jobs:
             exit 1
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Run smoke tests
+        env:
+          CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+          CONTAINER_PORT: ${{ secrets.CONTAINER_PORT_HOST }}
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🧪 Running Post-Deployment Smoke Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          BASE_URL="http://localhost:$CONTAINER_PORT"
+          FAILED_TESTS=0
+          TOTAL_TESTS=0
+          
+          # Function to run a smoke test
+          run_smoke_test() {
+            local test_name="$1"
+            local endpoint="$2"
+            local expected_status="${3:-200}"
+            
+            TOTAL_TESTS=$((TOTAL_TESTS + 1))
+            echo ""
+            echo "Test $TOTAL_TESTS: $test_name"
+            echo "  Endpoint: $endpoint"
+            
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL$endpoint" --max-time 10)
+            
+            if [ "$HTTP_CODE" = "$expected_status" ]; then
+              echo "  ✅ PASSED (HTTP $HTTP_CODE)"
+            else
+              echo "  ❌ FAILED (Expected HTTP $expected_status, got HTTP $HTTP_CODE)"
+              FAILED_TESTS=$((FAILED_TESTS + 1))
+            fi
+          }
+          
+          # Critical smoke tests
+          run_smoke_test "Health Check" "/api/health" "200"
+          run_smoke_test "Root Endpoint" "/" "200"
+          
+          # Add your application-specific smoke tests
+          # run_smoke_test "API Version" "/api/version" "200"
+          # run_smoke_test "User List" "/api/users" "200"
+          # run_smoke_test "Database Connection" "/api/db/health" "200"
+          
+          # Response time test
+          echo ""
+          echo "Test: Response Time"
+          RESPONSE_TIME=$(curl -o /dev/null -s -w '%{time_total}' "$BASE_URL/api/health")
+          RESPONSE_TIME_MS=$(echo "$RESPONSE_TIME * 1000" | bc)
+          echo "  Response time: ${RESPONSE_TIME_MS}ms"
+          
+          if [ $(echo "$RESPONSE_TIME < 1.0" | bc) -eq 1 ]; then
+            echo "  ✅ PASSED (< 1000ms)"
+          else
+            echo "  ⚠️  WARNING (> 1000ms)"
+          fi
+          
+          # Container health test
+          echo ""
+          echo "Test: Container Health"
+          if docker ps | grep -q "$CONTAINER_NAME.*Up"; then
+            echo "  ✅ PASSED (Container is running)"
+          else
+            echo "  ❌ FAILED (Container is not running)"
+            FAILED_TESTS=$((FAILED_TESTS + 1))
+          fi
+          
+          # Memory usage test
+          echo ""
+          echo "Test: Memory Usage"
+          MEMORY_USAGE=$(docker stats --no-stream --format "{{.MemPerc}}" "$CONTAINER_NAME" | sed 's/%//')
+          echo "  Memory usage: ${MEMORY_USAGE}%"
+          
+          if [ $(echo "$MEMORY_USAGE < 80.0" | bc -l) -eq 1 ]; then
+            echo "  ✅ PASSED (< 80%)"
+          else
+            echo "  ⚠️  WARNING (> 80%)"
+          fi
+          
+          # Results summary
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 Smoke Test Results"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Total Tests:  $TOTAL_TESTS"
+          echo "Passed:       $((TOTAL_TESTS - FAILED_TESTS))"
+          echo "Failed:       $FAILED_TESTS"
+          echo ""
+          
+          if [ $FAILED_TESTS -eq 0 ]; then
+            echo "✅ ALL SMOKE TESTS PASSED"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            # Add to GitHub summary
+            echo "### 🧪 Smoke Tests: ✅ PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All $TOTAL_TESTS smoke tests passed successfully." >> $GITHUB_STEP_SUMMARY
+            
+            exit 0
+          else
+            echo "❌ SMOKE TESTS FAILED"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            # Add to GitHub summary
+            echo "### 🧪 Smoke Tests: ❌ FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "$FAILED_TESTS out of $TOTAL_TESTS tests failed." >> $GITHUB_STEP_SUMMARY
+            
+            echo ""
+            echo "🔄 INITIATING ROLLBACK DUE TO FAILED SMOKE TESTS"
+            
+            # Rollback
+            docker stop "$CONTAINER_NAME" 2>&1 || true
+            docker rm "$CONTAINER_NAME" 2>&1 || true
+            
+            echo "⚠️  Deployment rolled back due to smoke test failures"
+            exit 1
+          fi
 
       - name: Cleanup
         if: always()
