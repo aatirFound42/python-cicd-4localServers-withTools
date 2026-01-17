@@ -168,35 +168,35 @@ jobs:
           
           if [ -f trivy-report.json ]; then
             CRITICAL=$(python3 << 'PYTHON_EOF'
-          import json
-          try:
-              with open('trivy-report.json') as f:
-                  data = json.load(f)
-                  count = 0
-                  for result in data.get('Results', []):
-                      for vuln in result.get('Vulnerabilities', []):
-                          if vuln.get('Severity') == 'CRITICAL':
-                              count += 1
-                  print(count)
-          except:
-              print(0)
-          PYTHON_EOF
-          )
+            import json
+            try:
+                with open('trivy-report.json') as f:
+                    data = json.load(f)
+                    count = 0
+                    for result in data.get('Results', []):
+                        for vuln in result.get('Vulnerabilities', []):
+                            if vuln.get('Severity') == 'CRITICAL':
+                                count += 1
+                    print(count)
+            except:
+                print(0)
+            PYTHON_EOF
+            )
             
             HIGH=$(python3 << 'PYTHON_EOF'
-              import json
-              try:
-                  with open('trivy-report.json') as f:
-                      data = json.load(f)
-                      count = 0
-                      for result in data.get('Results', []):
-                          for vuln in result.get('Vulnerabilities', []):
-                              if vuln.get('Severity') == 'HIGH':
-                                  count += 1
-                      print(count)
-              except:
-                  print(0)
-              PYTHON_EOF
+            import json
+            try:
+                with open('trivy-report.json') as f:
+                    data = json.load(f)
+                    count = 0
+                    for result in data.get('Results', []):
+                        for vuln in result.get('Vulnerabilities', []):
+                            if vuln.get('Severity') == 'HIGH':
+                                count += 1
+                    print(count)
+            except:
+                print(0)
+            PYTHON_EOF
             )
             
             echo "Results:"
@@ -323,14 +323,14 @@ jobs:
             
             if [ -f audit-report.json ]; then
               VULN_COUNT=$(python3 << 'PYTHON_EOF'
-                import json
-                try:
-                    with open('audit-report.json') as f:
-                        data = json.load(f)
-                        print(len(data.get('vulnerabilities', [])))
-                except:
-                    print(0)
-                PYTHON_EOF
+              import json
+              try:
+                  with open('audit-report.json') as f:
+                      data = json.load(f)
+                      print(len(data.get('vulnerabilities', [])))
+              except:
+                  print(0)
+              PYTHON_EOF
               )
               
               if [ "$VULN_COUNT" -gt 0 ]; then
@@ -368,17 +368,17 @@ jobs:
           
           if [ -f trufflehog-report.json ]; then
             SECRET_COUNT=$(python3 << 'PYTHON_EOF'
-              import json
-              try:
-                  with open('trufflehog-report.json') as f:
-                      data = json.load(f)
-                      if isinstance(data, list):
-                          print(len(data))
-                      else:
-                          print(0)
-              except:
-                  print(0)
-              PYTHON_EOF
+            import json
+            try:
+                with open('trufflehog-report.json') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        print(len(data))
+                    else:
+                        print(0)
+            except:
+                print(0)
+            PYTHON_EOF
             )
             
             if [ "$SECRET_COUNT" -gt 0 ]; then
@@ -500,30 +500,30 @@ jobs:
           fi
           
           python3 << 'PYTHON_EOF'
-            import json
-            import sys
+          import json
+          import sys
 
-            with open('coverage.json') as f:
-                data = json.load(f)
-                coverage = data['totals']['percent_covered']
-                threshold = 85
-                
-                print('━' * 60)
-                print('Coverage Report')
-                print('━' * 60)
-                print(f'Current:   {coverage:.2f}%')
-                print(f'Required:  {threshold}%')
-                print(f'Status:    ', end='')
-                
-                if coverage < threshold:
-                    print('❌ FAILED')
-                    print('━' * 60)
-                    sys.exit(1)
-                else:
-                    print('✅ PASSED')
-                    print('━' * 60)
-                    sys.exit(0)
-            PYTHON_EOF
+          with open('coverage.json') as f:
+              data = json.load(f)
+              coverage = data['totals']['percent_covered']
+              threshold = 85
+              
+              print('━' * 60)
+              print('Coverage Report')
+              print('━' * 60)
+              print(f'Current:   {coverage:.2f}%')
+              print(f'Required:  {threshold}%')
+              print(f'Status:    ', end='')
+              
+              if coverage < threshold:
+                  print('❌ FAILED')
+                  print('━' * 60)
+                  sys.exit(1)
+              else:
+                  print('✅ PASSED')
+                  print('━' * 60)
+                  sys.exit(0)
+          PYTHON_EOF
       
       - name: Upload coverage reports
         if: always()
@@ -967,14 +967,14 @@ jobs:
           # Dependency vulnerabilities
           if [ -f coverage-artifacts/pip-audit-report/audit-report.json ]; then
             DEPS=$(python3 << 'PYTHON_EOF'
-              import json
-              try:
-                  with open('coverage-artifacts/pip-audit-report/audit-report.json') as f:
-                      data = json.load(f)
-                      print(len(data.get('vulnerabilities', [])))
-              except:
-                  print(0)
-              PYTHON_EOF
+            import json
+            try:
+                with open('coverage-artifacts/pip-audit-report/audit-report.json') as f:
+                    data = json.load(f)
+                    print(len(data.get('vulnerabilities', [])))
+            except:
+                print(0)
+            PYTHON_EOF
             )
             echo "Dependencies (pip-audit): $([ "$DEPS" -eq 0 ] && echo '✅' || echo '⚠️')  $DEPS vulnerabilities"
           fi
@@ -982,14 +982,14 @@ jobs:
           # Git secrets
           if [ -f coverage-artifacts/trufflehog-report/trufflehog-report.json ]; then
             SECRETS=$(python3 << 'PYTHON_EOF'
-              import json
-              try:
-                  with open('coverage-artifacts/trufflehog-report/trufflehog-report.json') as f:
-                      data = json.load(f)
-                      print(len(data) if isinstance(data, list) else 0)
-              except:
-                  print(0)
-              PYTHON_EOF
+            import json
+            try:
+                with open('coverage-artifacts/trufflehog-report/trufflehog-report.json') as f:
+                    data = json.load(f)
+                    print(len(data) if isinstance(data, list) else 0)
+            except:
+                print(0)
+            PYTHON_EOF
             )
             echo "Git History (TruffleHog): $([ "$SECRETS" -eq 0 ] && echo '✅' || echo '⚠️')  $SECRETS potential secrets"
           fi
@@ -997,19 +997,19 @@ jobs:
           # Container vulnerabilities
           if [ -f coverage-artifacts/trivy-reports/trivy-report.json ]; then
             CONTAINER=$(python3 << 'PYTHON_EOF'
-              import json
-              try:
-                  with open('coverage-artifacts/trivy-reports/trivy-report.json') as f:
-                      data = json.load(f)
-                      count = 0
-                      for result in data.get('Results', []):
-                          for vuln in result.get('Vulnerabilities', []):
-                              if vuln.get('Severity') in ['CRITICAL', 'HIGH']:
-                                  count += 1
-                      print(count)
-              except:
-                  print(0)
-              PYTHON_EOF
+            import json
+            try:
+                with open('coverage-artifacts/trivy-reports/trivy-report.json') as f:
+                    data = json.load(f)
+                    count = 0
+                    for result in data.get('Results', []):
+                        for vuln in result.get('Vulnerabilities', []):
+                            if vuln.get('Severity') in ['CRITICAL', 'HIGH']:
+                                count += 1
+                    print(count)
+            except:
+                print(0)
+            PYTHON_EOF
             )
             echo "Container Image (Trivy):  $([ "$CONTAINER" -eq 0 ] && echo '✅' || echo '⚠️')  $CONTAINER critical/high CVEs"
           fi
