@@ -1,4 +1,4 @@
-name: Python CI/CD Pipeline
+name: Python CI/CD Pipeline - Enhanced
 
 on:
   push:
@@ -11,6 +11,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   PYTHON_VERSION: '3.9'
+  CACHE_VERSION: v1  # Increment to bust cache
 
 jobs:
   
@@ -19,12 +20,14 @@ jobs:
     name: Build Docker Image
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build-push.outputs.digest }}
     
     steps:
       - name: Checkout code
@@ -52,9 +55,10 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
+            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=sha,prefix={{branch}}-
             type=raw,value=latest,enable={{is_default_branch}}
       
       - name: Build and push Docker image
@@ -62,11 +66,13 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
 
       - name: Display build summary
         run: |
@@ -75,6 +81,8 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📦 Image Tags:"
           echo "${{ steps.meta.outputs.tags }}" | sed 's/^/   /'
+          echo ""
+          echo "🔑 Image Digest: ${{ steps.build-push.outputs.digest }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
   # ====== STAGE 2: CONTAINER SECURITY SCAN ======
@@ -82,11 +90,12 @@ jobs:
     name: Scan Docker Image
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: build
     permissions:
       contents: read
       packages: read
-      security-events: write  # Required for SARIF upload
+      security-events: write
     
     steps:
       - name: Set lowercase image name
@@ -101,69 +110,94 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
+      - name: Determine image tag
+        id: image-tag
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG="pr-${{ github.event.pull_request.number }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using image tag: $TAG"
+      
       - name: Pull Docker image
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-tag.outputs.tag }}"
           echo "Pulling image: $IMAGE"
-          docker pull "$IMAGE" || echo "Image not available, skipping scan"
+          
+          if docker pull "$IMAGE" 2>&1; then
+            echo "✅ Image pulled successfully"
+          else
+            echo "⚠️ Image not available, will skip scanning"
+            echo "SKIP_SCAN=true" >> $GITHUB_ENV
+            exit 0
+          fi
       
       - name: Run Trivy vulnerability scanner
+        if: env.SKIP_SCAN != 'true'
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest'
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-tag.outputs.tag }}'
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
       
       - name: Run Trivy JSON report
+        if: env.SKIP_SCAN != 'true'
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🐳 Scanning Docker Image for Vulnerabilities"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # Install Trivy
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          # Install Trivy using modern GPG method
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
+            sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+          
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | \
+            sudo tee /etc/apt/sources.list.d/trivy.list
+          
           sudo apt-get update
           sudo apt-get install trivy -y
           
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-tag.outputs.tag }}"
           
           # Run scan and generate JSON report
           trivy image --format json --output trivy-report.json "$IMAGE" || true
           
           if [ -f trivy-report.json ]; then
-            # Parse results
-            CRITICAL=$(python -c "
-            import json
-            try:
-                with open('trivy-report.json') as f:
-                    data = json.load(f)
-                    count = 0
-                    for result in data.get('Results', []):
-                        for vuln in result.get('Vulnerabilities', []):
-                            if vuln.get('Severity') == 'CRITICAL':
-                                count += 1
-                    print(count)
-            except:
-                print(0)
-            " 2>/dev/null || echo "0")
+            CRITICAL=$(python3 << 'PYTHON_EOF'
+          import json
+          try:
+              with open('trivy-report.json') as f:
+                  data = json.load(f)
+                  count = 0
+                  for result in data.get('Results', []):
+                      for vuln in result.get('Vulnerabilities', []):
+                          if vuln.get('Severity') == 'CRITICAL':
+                              count += 1
+                  print(count)
+          except:
+              print(0)
+          PYTHON_EOF
+          )
             
-            HIGH=$(python -c "
-            import json
-            try:
-                with open('trivy-report.json') as f:
-                    data = json.load(f)
-                    count = 0
-                    for result in data.get('Results', []):
-                        for vuln in result.get('Vulnerabilities', []):
-                            if vuln.get('Severity') == 'HIGH':
-                                count += 1
-                    print(count)
-            except:
-                print(0)
-            " 2>/dev/null || echo "0")
+            HIGH=$(python3 << 'PYTHON_EOF'
+          import json
+          try:
+              with open('trivy-report.json') as f:
+                  data = json.load(f)
+                  count = 0
+                  for result in data.get('Results', []):
+                      for vuln in result.get('Vulnerabilities', []):
+                          if vuln.get('Severity') == 'HIGH':
+                              count += 1
+                  print(count)
+          except:
+              print(0)
+          PYTHON_EOF
+          )
             
             echo "Results:"
             echo "  🔴 Critical: $CRITICAL"
@@ -174,7 +208,6 @@ jobs:
               echo "⚠️  Vulnerabilities detected in container image"
               echo "::warning::Trivy detected $CRITICAL critical and $HIGH high severity vulnerabilities"
               
-              # Display top 10 vulnerabilities
               echo ""
               echo "Top vulnerabilities:"
               trivy image --format table --severity CRITICAL,HIGH "$IMAGE" | head -n 20
@@ -188,13 +221,13 @@ jobs:
       
       - name: Upload Trivy scan results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && env.SKIP_SCAN != 'true'
         with:
           sarif_file: 'trivy-results.sarif'
         continue-on-error: true
       
       - name: Upload Trivy reports
-        if: always()
+        if: always() && env.SKIP_SCAN != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: trivy-reports
@@ -208,6 +241,7 @@ jobs:
     name: Code Quality & Linting
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: build
     
     steps:
@@ -220,10 +254,20 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
       
+      # ✅ IMPROVEMENT: Dependency caching
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-lint-${{ env.CACHE_VERSION }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-lint-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-pip-lint-
+      
       - name: Install linting tools
         run: |
-          python -m pip install --upgrade pip
-          pip install black isort flake8 pylint mypy
+          python -m pip install --upgrade pip setuptools wheel
+          pip install black isort flake8 pylint mypy pip-audit
       
       - name: Check code formatting with Black
         run: |
@@ -267,28 +311,37 @@ jobs:
           mypy app/ --ignore-missing-imports --show-error-codes --pretty
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: Run dependency security scan (Safety)
+      # ✅ IMPROVEMENT: Use pip-audit instead of deprecated safety
+      - name: Run dependency security scan (pip-audit)
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🛡️  Scanning Dependencies for Vulnerabilities"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          pip install safety
-          
-          # Generate requirements for scanning
           if [ -f requirements.txt ]; then
-            safety check --file requirements.txt --json > safety-report.json || true
+            pip-audit --format json --output audit-report.json || true
             
-            VULN_COUNT=$(python -c "import json; data=json.load(open('safety-report.json')); print(len(data.get('vulnerabilities', [])))" 2>/dev/null || echo "0")
-            
-            if [ "$VULN_COUNT" -gt 0 ]; then
-              echo "⚠️  Found $VULN_COUNT vulnerable dependencies"
-              echo ""
-              safety check --file requirements.txt --output text
-              echo ""
-              echo "::warning::Safety detected $VULN_COUNT vulnerable dependencies"
-            else
-              echo "✅ No vulnerable dependencies found"
+            if [ -f audit-report.json ]; then
+              VULN_COUNT=$(python3 << 'PYTHON_EOF'
+                import json
+                try:
+                    with open('audit-report.json') as f:
+                        data = json.load(f)
+                        print(len(data.get('vulnerabilities', [])))
+                except:
+                    print(0)
+                PYTHON_EOF
+              )
+              
+              if [ "$VULN_COUNT" -gt 0 ]; then
+                echo "⚠️  Found $VULN_COUNT vulnerable dependencies"
+                echo ""
+                pip-audit --format text || true
+                echo ""
+                echo "::warning::pip-audit detected $VULN_COUNT vulnerable dependencies"
+              else
+                echo "✅ No vulnerable dependencies found"
+              fi
             fi
           else
             echo "⚠️  requirements.txt not found"
@@ -300,8 +353,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: safety-report
-          path: safety-report.json
+          name: pip-audit-report
+          path: audit-report.json
 
       - name: Scan for secrets in git history (TruffleHog)
         run: |
@@ -311,22 +364,22 @@ jobs:
           
           pip install truffleHog3
           
-          # Scan recent commits (last 10 for performance)
           trufflehog3 --format json --output trufflehog-report.json . || true
           
           if [ -f trufflehog-report.json ]; then
-            SECRET_COUNT=$(python -c "
-            import json
-            try:
-                with open('trufflehog-report.json') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        print(len(data))
-                    else:
-                        print(0)
-            except:
-                print(0)
-            " 2>/dev/null || echo "0")
+            SECRET_COUNT=$(python3 << 'PYTHON_EOF'
+              import json
+              try:
+                  with open('trufflehog-report.json') as f:
+                      data = json.load(f)
+                      if isinstance(data, list):
+                          print(len(data))
+                      else:
+                          print(0)
+              except:
+                  print(0)
+              PYTHON_EOF
+            )
             
             if [ "$SECRET_COUNT" -gt 0 ]; then
               echo "⚠️  Found $SECRET_COUNT potential secrets in git history"
@@ -356,6 +409,8 @@ jobs:
           echo "✓ Flake8 style guide"
           echo "✓ Pylint code quality"
           echo "✓ Mypy type checking"
+          echo "✓ Dependency security scan"
+          echo "✓ Secret detection"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
@@ -364,12 +419,13 @@ jobs:
     name: Test (Python ${{ matrix.python-version }})
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [build, scan-image, lint]
     
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.9', '3.10', '3.11', '3.12']
     
     steps:
       - name: Checkout code
@@ -381,10 +437,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
       
+      # ✅ IMPROVEMENT: Better dependency caching
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-test-${{ matrix.python-version }}-${{ env.CACHE_VERSION }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-test-${{ matrix.python-version }}-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-pip-test-${{ matrix.python-version }}-
+      
+      # ✅ IMPROVEMENT: Install dependencies from multiple requirement files
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           
+          # Install main dependencies
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
@@ -392,7 +460,18 @@ jobs:
             exit 1
           fi
           
-          pip install pytest-xdist pytest-timeout pytest-cov
+          # Install dev dependencies if available
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          fi
+          
+          # Install test dependencies
+          pip install pytest-xdist pytest-timeout pytest-cov pytest-mock
+          
+          # Display installed packages
+          echo ""
+          echo "📦 Installed packages:"
+          pip list
 
       - name: Run tests with coverage
         run: |
@@ -408,8 +487,10 @@ jobs:
             --cov-report=xml \
             --cov-report=html \
             --cov-report=json \
+            --cov-report=term-missing \
             -n auto \
-            --timeout=30
+            --timeout=30 \
+            --strict-markers
 
       - name: Check coverage threshold (85%)
         run: |
@@ -418,26 +499,32 @@ jobs:
             exit 1
           fi
           
-          python -c "
-          import json
-          with open('coverage.json') as f:
-              data = json.load(f)
-              coverage = data['totals']['percent_covered']
-              threshold = 85
-              print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-              print(f'Coverage Report')
-              print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-              print(f'Current:   {coverage:.2f}%')
-              print(f'Required:  {threshold}%')
-              print(f'Status:    ', end='')
-              if coverage < threshold:
-                  print(f'❌ FAILED')
-                  print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-                  exit(1)
-              else:
-                  print(f'✅ PASSED')
-                  print(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-          "
+          python3 << 'PYTHON_EOF'
+            import json
+            import sys
+
+            with open('coverage.json') as f:
+                data = json.load(f)
+                coverage = data['totals']['percent_covered']
+                threshold = 85
+                
+                print('━' * 60)
+                print('Coverage Report')
+                print('━' * 60)
+                print(f'Current:   {coverage:.2f}%')
+                print(f'Required:  {threshold}%')
+                print(f'Status:    ', end='')
+                
+                if coverage < threshold:
+                    print('❌ FAILED')
+                    print('━' * 60)
+                    sys.exit(1)
+                else:
+                    print('✅ PASSED')
+                    print('━' * 60)
+                    sys.exit(0)
+            PYTHON_EOF
+          )
       
       - name: Upload coverage reports
         if: always()
@@ -453,24 +540,9 @@ jobs:
           name: coverage-json-${{ matrix.python-version }}
           path: coverage.json
       
-      # - name: Run code quality checks
-      #   run: |
-      #     pip install flake8 pylint
-          
-      #     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      #     echo "📋 Running Flake8 Analysis"
-      #     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      #     flake8 app/ tests/ --max-line-length=100 --statistics --exit-zero
-          
-      #     echo ""
-      #     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      #     echo "📋 Running Pylint Analysis"
-      #     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      #     pylint app/ tests/ --exit-zero
-      
       - name: Security scan with Bandit
         run: |
-          pip install bandit
+          pip install bandit[toml]
           
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🔒 Running Bandit Security Scan"
@@ -479,7 +551,7 @@ jobs:
           bandit -r app/ -f json -o bandit-report.json -ll || true
           
           if [ -f bandit-report.json ]; then
-            ISSUE_COUNT=$(python -c "import json; data=json.load(open('bandit-report.json')); print(len(data.get('results', [])))" 2>/dev/null || echo "0")
+            ISSUE_COUNT=$(python3 -c "import json; data=json.load(open('bandit-report.json')); print(len(data.get('results', [])))" 2>/dev/null || echo "0")
             
             if [ "$ISSUE_COUNT" -gt 0 ]; then
               echo "⚠️  Found $ISSUE_COUNT security issue(s)"
@@ -502,7 +574,7 @@ jobs:
           detect-secrets scan --all-files --force-use-all-plugins > .secrets.baseline || true
           
           if [ -f .secrets.baseline ]; then
-            SECRET_COUNT=$(python -c "import json; data=json.load(open('.secrets.baseline')); print(len(data.get('results', {})))" 2>/dev/null || echo "0")
+            SECRET_COUNT=$(python3 -c "import json; data=json.load(open('.secrets.baseline')); print(len(data.get('results', {})))" 2>/dev/null || echo "0")
             
             if [ "$SECRET_COUNT" -gt 0 ]; then
               echo "⚠️  Found $SECRET_COUNT potential secret(s)"
@@ -531,7 +603,6 @@ jobs:
           echo "✓ Unit Tests"
           echo "✓ Integration Tests"
           echo "✓ Code Coverage (≥85%)"
-          echo "✓ Code Quality Checks"
           echo "✓ Security Scans"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -540,6 +611,7 @@ jobs:
   performance-test:
     name: Performance & Load Testing
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [build, test]
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     
@@ -555,6 +627,12 @@ jobs:
       - name: Set lowercase image name
         run: |
           echo "IMAGE_NAME=$(echo ${{ env.IMAGE_NAME }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Set performance test variables
+        run: |
+          # ✅ IMPROVEMENT: Use unique names to avoid conflicts
+          echo "PERF_CONTAINER=perf-test-${{ github.run_id }}" >> $GITHUB_ENV
+          echo "PERF_PORT=$((8080 + (${{ github.run_id }} % 1000)))" >> $GITHUB_ENV
       
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -574,8 +652,8 @@ jobs:
           docker pull "$IMAGE"
           
           docker run -d \
-            --name perf-test-container \
-            -p 8080:5000 \
+            --name "$PERF_CONTAINER" \
+            -p "$PERF_PORT:5000" \
             -e FLASK_ENV=testing \
             "$IMAGE"
           
@@ -584,8 +662,8 @@ jobs:
           
           # Health check
           for i in {1..5}; do
-            if curl -sf http://localhost:8080/api/health >/dev/null 2>&1; then
-              echo "✅ Container is ready"
+            if curl -sf "http://localhost:$PERF_PORT/api/health" >/dev/null 2>&1; then
+              echo "✅ Container is ready on port $PERF_PORT"
               break
             fi
             echo "⏳ Waiting for container... ($i/5)"
@@ -607,21 +685,31 @@ jobs:
           if [ ! -f tests/performance/locustfile.py ]; then
             mkdir -p tests/performance
             cat > tests/performance/locustfile.py << 'LOCUST_EOF'
-          from locust import HttpUser, task, between
+            from locust import HttpUser, task, between
 
-          class APIUser(HttpUser):
-              wait_time = between(1, 3)
-              host = "http://localhost:8080"
-              
-              @task(3)
-              def health_check(self):
-                  self.client.get("/api/health")
-              
-              @task(1)
-              def index(self):
-                  self.client.get("/")
-          LOCUST_EOF
+            class APIUser(HttpUser):
+                wait_time = between(1, 3)
+                host = "http://localhost:$PERF_PORT"
+                
+                @task(3)
+                def health_check(self):
+                    """Health check endpoint - most frequent"""
+                    self.client.get("/api/health")
+                
+                @task(2)
+                def index(self):
+                    """Index/root endpoint"""
+                    self.client.get("/")
+                
+                @task(1)
+                def api_endpoint(self):
+                    """Sample API endpoint"""
+                    self.client.get("/api/v1/data")
+            LOCUST_EOF
           fi
+          
+          # Replace placeholder with actual port
+          sed -i "s/\$PERF_PORT/$PERF_PORT/g" tests/performance/locustfile.py
           
           # Run locust headless
           locust -f tests/performance/locustfile.py \
@@ -629,7 +717,7 @@ jobs:
             --users 50 \
             --spawn-rate 10 \
             --run-time 60s \
-            --host http://localhost:8080 \
+            --host "http://localhost:$PERF_PORT" \
             --html performance-report.html \
             --csv performance-results || true
           
@@ -648,17 +736,129 @@ jobs:
             cat performance-results_stats.csv
             echo ""
             
-            # Check failure rate
-            FAILURES=$(tail -n 1 performance-results_stats.csv | cut -d',' -f7 | tr -d ' ')
-            echo "Failure Rate: $FAILURES%"
+            # Parse CSV and check metrics
+            # CSV columns: Type,Name,Request Count,Failure Count,Median,Average,Min,Max,Content Size,Requests/s,Failures/s,50%,66%,75%,80%,90%,95%,98%,99%,99.9%,99.99%,100%
             
-            # Fail if failure rate > 5%
-            if [ $(echo "$FAILURES > 5.0" | bc -l) -eq 1 ]; then
-              echo "❌ FAILED: Failure rate exceeds 5%"
-              exit 1
+            # Get the aggregated row (last non-empty line)
+            STATS_LINE=$(grep -v '^Type,Name' performance-results_stats.csv | tail -n 1)
+            
+            # Extract key metrics
+            REQUEST_COUNT=$(echo "$STATS_LINE" | cut -d',' -f3 | tr -d ' ')
+            FAILURE_COUNT=$(echo "$STATS_LINE" | cut -d',' -f4 | tr -d ' ')
+            AVG_RESPONSE=$(echo "$STATS_LINE" | cut -d',' -f6 | tr -d ' ')
+            P95_RESPONSE=$(echo "$STATS_LINE" | cut -d',' -f16 | tr -d ' ')
+            RPS=$(echo "$STATS_LINE" | cut -d',' -f10 | tr -d ' ')
+            
+            # Calculate failure rate
+            if [ "$REQUEST_COUNT" -gt 0 ]; then
+              FAILURE_RATE=$(echo "scale=2; ($FAILURE_COUNT / $REQUEST_COUNT) * 100" | bc -l)
+            else
+              FAILURE_RATE="0"
+            fi
+            
+            echo "📊 Key Metrics:"
+            echo "  Total Requests:    $REQUEST_COUNT"
+            echo "  Failed Requests:   $FAILURE_COUNT"
+            echo "  Failure Rate:      ${FAILURE_RATE}%"
+            echo "  Requests/sec:      $RPS"
+            echo "  Avg Response Time: ${AVG_RESPONSE}ms"
+            echo "  P95 Response Time: ${P95_RESPONSE}ms"
+            echo ""
+            
+            # Performance thresholds
+            FAILURE_THRESHOLD=5.0
+            AVG_RESPONSE_THRESHOLD=500
+            P95_RESPONSE_THRESHOLD=1000
+            
+            PERF_FAILED=0
+            
+            # Check failure rate
+            if [ $(echo "$FAILURE_RATE > $FAILURE_THRESHOLD" | bc -l) -eq 1 ]; then
+              echo "❌ FAILED: Failure rate ${FAILURE_RATE}% exceeds threshold ${FAILURE_THRESHOLD}%"
+              PERF_FAILED=1
             else
               echo "✅ PASSED: Failure rate within acceptable limits"
             fi
+            
+            # Check average response time
+            if [ $(echo "$AVG_RESPONSE > $AVG_RESPONSE_THRESHOLD" | bc -l) -eq 1 ]; then
+              echo "⚠️  WARNING: Average response time ${AVG_RESPONSE}ms exceeds ${AVG_RESPONSE_THRESHOLD}ms"
+            else
+              echo "✅ PASSED: Average response time acceptable"
+            fi
+            
+            # Check P95 response time
+            if [ $(echo "$P95_RESPONSE > $P95_RESPONSE_THRESHOLD" | bc -l) -eq 1 ]; then
+              echo "⚠️  WARNING: P95 response time ${P95_RESPONSE}ms exceeds ${P95_RESPONSE_THRESHOLD}ms"
+            else
+              echo "✅ PASSED: P95 response time acceptable"
+            fi
+            
+            echo ""
+            
+            # Add to GitHub summary
+            echo "### 📊 Performance Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value | Threshold | Status |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Requests | $REQUEST_COUNT | - | ℹ️ |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failure Rate | ${FAILURE_RATE}% | ${FAILURE_THRESHOLD}% | $([ $(echo "$FAILURE_RATE <= $FAILURE_THRESHOLD" | bc -l) -eq 1 ] && echo '✅' || echo '❌') |" >> $GITHUB_STEP_SUMMARY
+            echo "| Requests/sec | $RPS | - | ℹ️ |" >> $GITHUB_STEP_SUMMARY
+            echo "| Avg Response | ${AVG_RESPONSE}ms | ${AVG_RESPONSE_THRESHOLD}ms | $([ $(echo "$AVG_RESPONSE <= $AVG_RESPONSE_THRESHOLD" | bc -l) -eq 1 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
+            echo "| P95 Response | ${P95_RESPONSE}ms | ${P95_RESPONSE_THRESHOLD}ms | $([ $(echo "$P95_RESPONSE <= $P95_RESPONSE_THRESHOLD" | bc -l) -eq 1 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
+            
+            if [ $PERF_FAILED -eq 1 ]; then
+              echo ""
+              echo "❌ Performance tests FAILED"
+              exit 1
+            fi
+          else
+            echo "⚠️  Performance results file not found"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+      
+      - name: Run benchmark tests
+        if: hashFiles('tests/benchmarks/*.py') != ''
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "⚡ Running Benchmark Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          pytest tests/benchmarks/ \
+            --benchmark-only \
+            --benchmark-json=benchmark-results.json \
+            --benchmark-columns=min,max,mean,median,stddev \
+            --benchmark-sort=mean || true
+          
+          if [ -f benchmark-results.json ]; then
+            echo ""
+            echo "✅ Benchmark tests completed"
+            echo "Results saved to benchmark-results.json"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
+      
+      - name: Check container resource usage
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "💻 Container Resource Usage"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Get container stats
+          docker stats "$PERF_CONTAINER" --no-stream --format \
+            "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}"
+          
+          # Extract memory percentage
+          MEM_PERC=$(docker stats "$PERF_CONTAINER" --no-stream --format "{{.MemPerc}}" | sed 's/%//')
+          
+          echo ""
+          if [ $(echo "$MEM_PERC < 80.0" | bc -l) -eq 1 ]; then
+            echo "✅ Memory usage: ${MEM_PERC}% (healthy)"
+          else
+            echo "⚠️  Memory usage: ${MEM_PERC}% (high)"
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         continue-on-error: true
@@ -671,18 +871,22 @@ jobs:
           path: |
             performance-report.html
             performance-results*.csv
+            benchmark-results.json
       
       - name: Cleanup test container
         if: always()
         run: |
-          docker stop perf-test-container 2>/dev/null || true
-          docker rm perf-test-container 2>/dev/null || true
+          echo "🧹 Cleaning up test container..."
+          docker stop "$PERF_CONTAINER" 2>/dev/null || true
+          docker rm "$PERF_CONTAINER" 2>/dev/null || true
+          echo "✅ Cleanup completed"
 
 
   # ====== STAGE 6: QUALITY GATES ======
   quality-gates:
     name: Quality Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [lint, test]
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     
@@ -706,7 +910,7 @@ jobs:
           for json_file in coverage-artifacts/coverage-json-*/coverage.json; do
             if [ -f "$json_file" ]; then
               version=$(basename $(dirname "$json_file") | sed 's/coverage-json-//')
-              coverage=$(python -c "import json; f=open('$json_file'); d=json.load(f); print(f\"{d['totals']['percent_covered']:.2f}\")" 2>&1)
+              coverage=$(python3 -c "import json; f=open('$json_file'); d=json.load(f); print(f\"{d['totals']['percent_covered']:.2f}\")" 2>&1)
               
               if [ $? -eq 0 ]; then
                 echo "Python $version: $coverage%"
@@ -728,7 +932,7 @@ jobs:
           for scan_dir in coverage-artifacts/security-scan-*; do
             if [ -d "$scan_dir" ] && [ -f "$scan_dir/bandit-report.json" ]; then
               version=$(basename "$scan_dir" | sed 's/security-scan-//')
-              issues=$(python -c "import json; f=open('$scan_dir/bandit-report.json'); d=json.load(f); print(len(d.get('results', [])))" 2>/dev/null || echo "0")
+              issues=$(python3 -c "import json; f=open('$scan_dir/bandit-report.json'); d=json.load(f); print(len(d.get('results', [])))" 2>/dev/null || echo "0")
               
               if [ "$issues" -gt 0 ]; then
                 echo "  Python $version: ⚠️  $issues issue(s)"
@@ -743,7 +947,7 @@ jobs:
           for scan_dir in coverage-artifacts/security-scan-*; do
             if [ -d "$scan_dir" ] && [ -f "$scan_dir/.secrets.baseline" ]; then
               version=$(basename "$scan_dir" | sed 's/security-scan-//')
-              secrets=$(python -c "import json; f=open('$scan_dir/.secrets.baseline'); d=json.load(f); print(len(d.get('results', {})))" 2>/dev/null || echo "0")
+              secrets=$(python3 -c "import json; f=open('$scan_dir/.secrets.baseline'); d=json.load(f); print(len(d.get('results', {})))" 2>/dev/null || echo "0")
               
               if [ "$secrets" -gt 0 ]; then
                 echo "  Python $version: ⚠️  $secrets potential secret(s)"
@@ -762,39 +966,52 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           # Dependency vulnerabilities
-          if [ -f coverage-artifacts/safety-report/safety-report.json ]; then
-            DEPS=$(python -c "import json; data=json.load(open('coverage-artifacts/safety-report/safety-report.json')); print(len(data.get('vulnerabilities', [])))" 2>/dev/null || echo "0")
-            echo "Dependencies (Safety):    $([ "$DEPS" -eq 0 ] && echo '✅' || echo '⚠️')  $DEPS vulnerabilities"
+          if [ -f coverage-artifacts/pip-audit-report/audit-report.json ]; then
+            DEPS=$(python3 << 'PYTHON_EOF'
+              import json
+              try:
+                  with open('coverage-artifacts/pip-audit-report/audit-report.json') as f:
+                      data = json.load(f)
+                      print(len(data.get('vulnerabilities', [])))
+              except:
+                  print(0)
+              PYTHON_EOF
+            )
+            echo "Dependencies (pip-audit): $([ "$DEPS" -eq 0 ] && echo '✅' || echo '⚠️')  $DEPS vulnerabilities"
           fi
           
           # Git secrets
           if [ -f coverage-artifacts/trufflehog-report/trufflehog-report.json ]; then
-            SECRETS=$(python -c "
-            import json
-            try:
-                data = json.load(open('coverage-artifacts/trufflehog-report/trufflehog-report.json'))
-                print(len(data) if isinstance(data, list) else 0)
-            except:
-                print(0)
-            " 2>/dev/null || echo "0")
+            SECRETS=$(python3 << 'PYTHON_EOF'
+              import json
+              try:
+                  with open('coverage-artifacts/trufflehog-report/trufflehog-report.json') as f:
+                      data = json.load(f)
+                      print(len(data) if isinstance(data, list) else 0)
+              except:
+                  print(0)
+              PYTHON_EOF
+            )
             echo "Git History (TruffleHog): $([ "$SECRETS" -eq 0 ] && echo '✅' || echo '⚠️')  $SECRETS potential secrets"
           fi
           
           # Container vulnerabilities
           if [ -f coverage-artifacts/trivy-reports/trivy-report.json ]; then
-            CONTAINER=$(python -c "
-            import json
-            try:
-                data = json.load(open('coverage-artifacts/trivy-reports/trivy-report.json'))
-                count = 0
-                for result in data.get('Results', []):
-                    for vuln in result.get('Vulnerabilities', []):
-                        if vuln.get('Severity') in ['CRITICAL', 'HIGH']:
-                            count += 1
-                print(count)
-            except:
-                print(0)
-            " 2>/dev/null || echo "0")
+            CONTAINER=$(python3 << 'PYTHON_EOF'
+              import json
+              try:
+                  with open('coverage-artifacts/trivy-reports/trivy-report.json') as f:
+                      data = json.load(f)
+                      count = 0
+                      for result in data.get('Results', []):
+                          for vuln in result.get('Vulnerabilities', []):
+                              if vuln.get('Severity') in ['CRITICAL', 'HIGH']:
+                                  count += 1
+                      print(count)
+              except:
+                  print(0)
+              PYTHON_EOF
+            )
             echo "Container Image (Trivy):  $([ "$CONTAINER" -eq 0 ] && echo '✅' || echo '⚠️')  $CONTAINER critical/high CVEs"
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -822,11 +1039,11 @@ jobs:
             exit 1
           fi
 
-
-  # ====== STAGE 7: REPORTS ======
+# ====== STAGE 7: REPORTS ======
   reports:
     name: Generate Reports
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: test
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     
@@ -943,6 +1160,12 @@ jobs:
                           <p>Detailed coverage report for Python 3.11 environment</p>
                           <span class="report-link">View Report →</span>
                       </a>
+                      
+                      <a href="coverage-html-3.12/index.html" class="report-card">
+                          <h3>🐍 Python 3.12</h3>
+                          <p>Detailed coverage report for Python 3.12 environment</p>
+                          <span class="report-link">View Report →</span>
+                      </a>
                   </div>
                   
                   <div class="status">
@@ -980,6 +1203,7 @@ jobs:
   notify:
     name: Pipeline Status
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: "!contains(github.event.head_commit.message, '[deploy-only]')"
     needs: [build, scan-image, lint, test, performance-test, quality-gates]
     
@@ -989,12 +1213,12 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📊 Pipeline Execution Summary"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Build:         ${{ needs.build.result }}"
-          echo "Image Scan:    ${{ needs.scan-image.result }}"
-          echo "Lint:          ${{ needs.lint.result }}"
-          echo "Tests:         ${{ needs.test.result }}"
+          echo "Build:            ${{ needs.build.result }}"
+          echo "Image Scan:       ${{ needs.scan-image.result }}"
+          echo "Lint:             ${{ needs.lint.result }}"
+          echo "Tests:            ${{ needs.test.result }}"
           echo "Performance Test: ${{ needs.performance-test.result }}"
-          echo "Quality Gates: ${{ needs.quality-gates.result }}"
+          echo "Quality Gates:    ${{ needs.quality-gates.result }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           if [ "${{ needs.build.result }}" = "success" ] && \
@@ -1016,18 +1240,23 @@ jobs:
             exit 1
           fi
 
-
-  # ====== STAGE 9: DEPLOYMENT ======
+# ====== ROLLING DEPLOYMENT STAGE ======
   deploy-prod:
-    name: Deploy to Production
+    name: Deploy to Production (Rolling)
     runs-on: self-hosted
     environment: production
+    timeout-minutes: 15
     needs: [build, scan-image, lint, test, performance-test, quality-gates, reports]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set environment variables
+        run: |
+          echo "IMAGE_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "DOCKER_IMAGE=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Verify runner environment
         run: |
@@ -1039,30 +1268,85 @@ jobs:
           echo "Docker:   $(docker --version)"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: Deploy container
+      # ✅ FIX: Proper secrets validation
+      - name: Validate required secrets
+        env:
+          CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+          CONTAINER_PORT_HOST: ${{ secrets.CONTAINER_PORT_HOST }}
+        run: |
+          EXIT_CODE=0
+          
+          if [ -z "$CONTAINER_NAME" ]; then
+            echo "❌ ERROR: CONTAINER_NAME secret is not set"
+            EXIT_CODE=1
+          fi
+          
+          if [ -z "$CONTAINER_PORT_HOST" ]; then
+            echo "❌ ERROR: CONTAINER_PORT_HOST secret is not set"
+            EXIT_CODE=1
+          fi
+          
+          if [ $EXIT_CODE -eq 1 ]; then
+            echo ""
+            echo "Please configure required secrets in repository settings:"
+            echo "  - CONTAINER_NAME"
+            echo "  - CONTAINER_PORT_HOST"
+            exit 1
+          fi
+          
+          echo "✅ All required secrets are configured"
+
+      # ✅ FIX: Proper image backup tagging
+      - name: Create backup of current image
+        env:
+          CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "💾 Creating Backup of Current Deployment"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Check if current container exists
+          if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+            # Get the current image
+            CURRENT_IMAGE=$(docker inspect --format='{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
+            
+            if [ -n "$CURRENT_IMAGE" ]; then
+              # Create backup tag
+              BACKUP_TAG="backup-$(date +%Y%m%d-%H%M%S)"
+              docker tag "$CURRENT_IMAGE" "$DOCKER_IMAGE:$BACKUP_TAG"
+              echo "✅ Backup created: $DOCKER_IMAGE:$BACKUP_TAG"
+              echo "BACKUP_IMAGE=$DOCKER_IMAGE:$BACKUP_TAG" >> $GITHUB_ENV
+            else
+              echo "⚠️  Could not determine current image"
+            fi
+          else
+            echo "ℹ️  No existing container to backup (first deployment)"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ✅ ROLLING DEPLOYMENT: Start new container before stopping old
+      - name: Rolling deployment
         env:
           CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
           CONTAINER_PORT: ${{ secrets.CONTAINER_PORT_HOST }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🚀 Starting Deployment"
+          echo "🚀 Starting Rolling Deployment"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # Configuration
-          DOCKER_IMAGE="ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')"
           IMAGE_TAG="latest"
+          NEW_CONTAINER="${CONTAINER_NAME}-new"
+          OLD_CONTAINER="${CONTAINER_NAME}"
+          NEW_PORT=$((CONTAINER_PORT + 1000))
           
-          echo "📦 Image:     $DOCKER_IMAGE:$IMAGE_TAG"
-          echo "🏷️  Container: $CONTAINER_NAME"
-          echo "🔌 Port:      $CONTAINER_PORT:5000"
+          echo "Configuration:"
+          echo "  📦 Image:         $DOCKER_IMAGE:$IMAGE_TAG"
+          echo "  🏷️  New Container: $NEW_CONTAINER"
+          echo "  🔌 New Port:      $NEW_PORT:5000"
+          echo "  🏷️  Old Container: $OLD_CONTAINER"
+          echo "  🔌 Old Port:      $CONTAINER_PORT:5000"
           echo ""
-          
-          # Validate secrets
-          if [ -z "$CONTAINER_NAME" ] || [ -z "$CONTAINER_PORT" ]; then
-            echo "❌ ERROR: Required secrets not configured"
-            exit 1
-          fi
           
           # Login to registry
           echo "🔐 Authenticating to GitHub Container Registry..."
@@ -1075,19 +1359,8 @@ jobs:
           echo "✅ Authentication successful"
           echo ""
           
-          # Stop old container
-          echo "🛑 Stopping existing container..."
-          if docker ps -a | grep -q "$CONTAINER_NAME"; then
-            docker stop "$CONTAINER_NAME" 2>&1 || true
-            docker rm "$CONTAINER_NAME" 2>&1 || true
-            echo "✅ Old container removed"
-          else
-            echo "ℹ️  No existing container found"
-          fi
-          echo ""
-          
           # Pull new image
-          echo "📥 Pulling Docker image..."
+          echo "📥 Pulling new Docker image..."
           docker pull "$DOCKER_IMAGE:$IMAGE_TAG"
           
           if [ $? -ne 0 ]; then
@@ -1097,9 +1370,86 @@ jobs:
           echo "✅ Image pulled successfully"
           echo ""
           
-          # Start new container
+          # Start new container on different port
           echo "🚀 Starting new container..."
           docker run -d \
+            --memory="512m" \
+            --cpus="1.0" \
+            --name "$NEW_CONTAINER" \
+            -p "$NEW_PORT:5000" \
+            -e FLASK_ENV=production \
+            -e FLASK_DEBUG=False \
+            --restart unless-stopped \
+            "$DOCKER_IMAGE:$IMAGE_TAG"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Failed to start new container"
+            exit 1
+          fi
+          echo "✅ New container started on port $NEW_PORT"
+          echo ""
+          
+          # Health check new container
+          echo "🏥 Performing health check on new container..."
+          HEALTH_SUCCESS=0
+          
+          for i in {1..10}; do
+            sleep 5
+            if curl -sf "http://localhost:$NEW_PORT/api/health" --max-time 5 >/dev/null 2>&1; then
+              HEALTH_SUCCESS=1
+              echo "✅ Health check passed (attempt $i)"
+              break
+            else
+              echo "⏳ Health check attempt $i/10..."
+            fi
+          done
+          
+          if [ $HEALTH_SUCCESS -eq 0 ]; then
+            echo ""
+            echo "❌ ERROR: New container failed health check"
+            echo "📋 Container logs:"
+            docker logs "$NEW_CONTAINER" --tail=50
+            echo ""
+            echo "🔄 Rolling back..."
+            docker stop "$NEW_CONTAINER" 2>&1 || true
+            docker rm "$NEW_CONTAINER" 2>&1 || true
+            exit 1
+          fi
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔄 Switching Traffic to New Container"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Stop old container (if exists)
+          if docker ps --format '{{.Names}}' | grep -q "^${OLD_CONTAINER}$"; then
+            echo "🛑 Stopping old container..."
+            docker stop "$OLD_CONTAINER" --time 30 2>&1 || true
+            echo "✅ Old container stopped gracefully"
+          else
+            echo "ℹ️  No old container to stop (first deployment)"
+          fi
+          
+          # Remove old container
+          if docker ps -a --format '{{.Names}}' | grep -q "^${OLD_CONTAINER}$"; then
+            echo "🗑️  Removing old container..."
+            docker rm "$OLD_CONTAINER" 2>&1 || true
+            echo "✅ Old container removed"
+          fi
+          
+          # Update port mapping by recreating with correct port
+          echo "🔄 Recreating container with production port..."
+          docker stop "$NEW_CONTAINER" --time 5 2>&1 || true
+          
+          # Get the image from the new container
+          NEW_IMAGE=$(docker inspect --format='{{.Image}}' "$NEW_CONTAINER" 2>/dev/null)
+          
+          docker rm "$NEW_CONTAINER" 2>&1 || true
+          
+          # Start final container with correct name and port
+          docker run -d \
+            --memory="512m" \
+            --cpus="1.0" \
             --name "$CONTAINER_NAME" \
             -p "$CONTAINER_PORT:5000" \
             -e FLASK_ENV=production \
@@ -1107,58 +1457,53 @@ jobs:
             --restart unless-stopped \
             "$DOCKER_IMAGE:$IMAGE_TAG"
           
-          if [ $? -ne 0 ]; then
-            echo "❌ ERROR: Failed to start container"
-            exit 1
-          fi
-          echo "✅ Container started"
+          echo "✅ Container recreated with production configuration"
           echo ""
           
-          # Health check with retries
-          echo "🏥 Performing health check..."
-          HEALTH_SUCCESS=0
+          # Final health check
+          echo "🏥 Performing final health check..."
+          sleep 5
           
-          for i in {1..3}; do
-            sleep 10
+          FINAL_HEALTH=0
+          for i in {1..5}; do
             if curl -sf "http://localhost:$CONTAINER_PORT/api/health" --max-time 5 >/dev/null 2>&1; then
-              HEALTH_SUCCESS=1
-              echo "✅ Health check passed (attempt $i)"
+              FINAL_HEALTH=1
+              echo "✅ Final health check passed"
               break
-            else
-              echo "⏳ Health check attempt $i/3..."
             fi
+            sleep 3
           done
           
-          echo ""
-          if [ $HEALTH_SUCCESS -eq 1 ]; then
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "✅ DEPLOYMENT SUCCESSFUL"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "🌐 Application: http://localhost:$CONTAINER_PORT"
-            echo "🏥 Health:      http://localhost:$CONTAINER_PORT/api/health"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          else
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "❌ DEPLOYMENT FAILED - Health Check Timeout"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if [ $FINAL_HEALTH -eq 0 ]; then
+            echo "❌ ERROR: Final health check failed"
             echo ""
-            echo "📋 Container logs:"
-            docker logs "$CONTAINER_NAME" --tail=30
-            echo ""
-            echo "🔄 Rolling back..."
+            echo "🔄 Attempting rollback to backup..."
+            
             docker stop "$CONTAINER_NAME" 2>&1 || true
             docker rm "$CONTAINER_NAME" 2>&1 || true
             
-            if docker images | grep -q "$DOCKER_IMAGE.*latest"; then
+            if [ -n "$BACKUP_IMAGE" ]; then
               docker run -d \
+                --memory="512m" \
+                --cpus="1.0" \
                 --name "$CONTAINER_NAME" \
                 -p "$CONTAINER_PORT:5000" \
+                -e FLASK_ENV=production \
+                -e FLASK_DEBUG=False \
                 --restart unless-stopped \
-                "$DOCKER_IMAGE:latest"
-              echo "⚠️  Rolled back to previous version"
+                "$BACKUP_IMAGE"
+              echo "⚠️  Rolled back to backup: $BACKUP_IMAGE"
             fi
             exit 1
           fi
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ ROLLING DEPLOYMENT SUCCESSFUL"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🌐 Application: http://localhost:$CONTAINER_PORT"
+          echo "🏥 Health:      http://localhost:$CONTAINER_PORT/api/health"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: Record deployment metrics
         if: success()
@@ -1187,7 +1532,9 @@ jobs:
             "duration_seconds": $DURATION,
             "status": "success",
             "environment": "production",
-            "image_tag": "latest"
+            "deployment_type": "rolling",
+            "image_tag": "latest",
+            "image_digest": "${{ needs.build.outputs.image-digest }}"
           }
           EOF
           )
@@ -1214,6 +1561,7 @@ jobs:
           echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Deployer | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment Type | 🔄 Rolling |" >> $GITHUB_STEP_SUMMARY
           echo "| Duration | ${DURATION}s |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ✅ Success |" >> $GITHUB_STEP_SUMMARY
           echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |" >> $GITHUB_STEP_SUMMARY
@@ -1283,11 +1631,6 @@ jobs:
           run_smoke_test "Health Check" "/api/health" "200"
           run_smoke_test "Root Endpoint" "/" "200"
           
-          # Add your application-specific smoke tests
-          # run_smoke_test "API Version" "/api/version" "200"
-          # run_smoke_test "User List" "/api/users" "200"
-          # run_smoke_test "Database Connection" "/api/db/health" "200"
-          
           # Response time test
           echo ""
           echo "Test: Response Time"
@@ -1304,7 +1647,8 @@ jobs:
           # Container health test
           echo ""
           echo "Test: Container Health"
-          if docker ps | grep -q "$CONTAINER_NAME.*Up"; then
+          RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
+          if [ "$RUNNING" = "true" ]; then
             echo "  ✅ PASSED (Container is running)"
           else
             echo "  ❌ FAILED (Container is not running)"
@@ -1337,7 +1681,6 @@ jobs:
             echo "✅ ALL SMOKE TESTS PASSED"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            # Add to GitHub summary
             echo "### 🧪 Smoke Tests: ✅ PASSED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "All $TOTAL_TESTS smoke tests passed successfully." >> $GITHUB_STEP_SUMMARY
@@ -1347,7 +1690,6 @@ jobs:
             echo "❌ SMOKE TESTS FAILED"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            # Add to GitHub summary
             echo "### 🧪 Smoke Tests: ❌ FAILED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "$FAILED_TESTS out of $TOTAL_TESTS tests failed." >> $GITHUB_STEP_SUMMARY
@@ -1355,13 +1697,45 @@ jobs:
             echo ""
             echo "🔄 INITIATING ROLLBACK DUE TO FAILED SMOKE TESTS"
             
-            # Rollback
+            # Rollback to backup
             docker stop "$CONTAINER_NAME" 2>&1 || true
             docker rm "$CONTAINER_NAME" 2>&1 || true
             
-            echo "⚠️  Deployment rolled back due to smoke test failures"
+            if [ -n "$BACKUP_IMAGE" ]; then
+              docker run -d \
+                --memory="512m" \
+                --cpus="1.0" \
+                --name "$CONTAINER_NAME" \
+                -p "$CONTAINER_PORT:5000" \
+                -e FLASK_ENV=production \
+                -e FLASK_DEBUG=False \
+                --restart unless-stopped \
+                "$BACKUP_IMAGE"
+              echo "⚠️  Rolled back to backup due to smoke test failures"
+            fi
             exit 1
           fi
+
+      - name: Cleanup old images
+        if: success()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🧹 Cleaning Up Old Images"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Keep only the last 5 backup images
+          docker images "$DOCKER_IMAGE" --format "{{.Tag}}" | \
+            grep "^backup-" | \
+            sort -r | \
+            tail -n +6 | \
+            xargs -r -I {} docker rmi "$DOCKER_IMAGE:{}" 2>/dev/null || true
+          
+          # Remove dangling images
+          docker image prune -f
+          
+          echo "✅ Cleanup completed"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        continue-on-error: true
 
       - name: Cleanup
         if: always()
@@ -1370,6 +1744,8 @@ jobs:
           [ -d ~/.ssh ] && rm -rf ~/.ssh || true
 
 
+
+# ✅ IMPROVEMENT: Better concurrency control
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
