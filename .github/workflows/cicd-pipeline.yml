@@ -184,20 +184,20 @@ jobs:
           )
             
             HIGH=$(python3 << 'PYTHON_EOF'
-          import json
-          try:
-              with open('trivy-report.json') as f:
-                  data = json.load(f)
-                  count = 0
-                  for result in data.get('Results', []):
-                      for vuln in result.get('Vulnerabilities', []):
-                          if vuln.get('Severity') == 'HIGH':
-                              count += 1
-                  print(count)
-          except:
-              print(0)
-          PYTHON_EOF
-          )
+              import json
+              try:
+                  with open('trivy-report.json') as f:
+                      data = json.load(f)
+                      count = 0
+                      for result in data.get('Results', []):
+                          for vuln in result.get('Vulnerabilities', []):
+                              if vuln.get('Severity') == 'HIGH':
+                                  count += 1
+                      print(count)
+              except:
+                  print(0)
+              PYTHON_EOF
+            )
             
             echo "Results:"
             echo "  🔴 Critical: $CRITICAL"
@@ -524,7 +524,6 @@ jobs:
                     print('━' * 60)
                     sys.exit(0)
             PYTHON_EOF
-          )
       
       - name: Upload coverage reports
         if: always()
