@@ -4,10 +4,18 @@ Comprehensive tests including edge cases and error conditions.
 """
 
 import pytest
+
 from app.utils import (
-    get_current_time, add_numbers, subtract_numbers,
-    multiply_numbers, divide_numbers, even_parity, is_even, is_odd,
-    square, absolute_value
+    absolute_value,
+    add_numbers,
+    divide_numbers,
+    even_parity,
+    get_current_time,
+    is_even,
+    is_odd,
+    multiply_numbers,
+    square,
+    subtract_numbers,
 )
 
 
@@ -22,7 +30,7 @@ class TestGetCurrentTime:
     def test_returns_iso_format(self):
         """Test that timestamp is in ISO format."""
         result = get_current_time()
-        assert 'T' in result  # ISO format has T separator
+        assert "T" in result  # ISO format has T separator
         assert len(result) > 0
 
     def test_contains_digits(self):
@@ -198,10 +206,10 @@ class TestEvenParity:
         3 = 0b11 (two 1s) → even parity → True
         0 = 0b0 (zero 1s) → even parity → True
         """
-        assert even_parity(3) is True   # 0b11 → 2 ones → even
-        assert even_parity(0) is True   # 0b0 → 0 ones → even
-        assert even_parity(5) is True   # 0b101 → 2 ones → even
-        assert even_parity(6) is True   # 0b110 → 2 ones → even
+        assert even_parity(3) is True  # 0b11 → 2 ones → even
+        assert even_parity(0) is True  # 0b0 → 0 ones → even
+        assert even_parity(5) is True  # 0b101 → 2 ones → even
+        assert even_parity(6) is True  # 0b110 → 2 ones → even
 
     def test_even_parity_return_false(self):
         """
