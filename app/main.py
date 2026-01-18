@@ -1,10 +1,12 @@
 """
 Flask web application - Main application file.
 Provides REST API endpoints for the CI/CD learning project.
+Along with prometheus checking.
 """
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from prometheus_flask_exporter import PrometheusMetrics
 
 from app.utils import (
     absolute_value,
@@ -21,6 +23,12 @@ from app.utils import (
 app = Flask(__name__)
 CORS(app)
 
+# Initialize metrics
+# 'group_by' allows you to group similar endpoints in charts
+metrics = PrometheusMetrics(app, group_by="path")
+
+# Static information as metric
+metrics.info("app_info", "Application info", version="1.0.3")
 
 # ============= HEALTH CHECK ENDPOINTS =============
 

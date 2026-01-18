@@ -221,13 +221,13 @@ jobs:
       
       - name: Upload Trivy scan results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
-        if: always() && env.SKIP_SCAN != 'true'
+        if: env.SKIP_SCAN != 'true'
         with:
           sarif_file: 'trivy-results.sarif'
         continue-on-error: true
       
       - name: Upload Trivy reports
-        if: always() && env.SKIP_SCAN != 'true'
+        if: env.SKIP_SCAN != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: trivy-reports
@@ -1323,15 +1323,15 @@ jobs:
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      # ✅ ROLLING DEPLOYMENT: Start new container before stopping old
-      - name: Rolling deployment
+      # DEPLOYMENT: Start new container before stopping old
+      - name: Deployment
         env:
           CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
           CONTAINER_PORT: ${{ secrets.CONTAINER_PORT_HOST }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🚀 Starting Rolling Deployment"
+          echo "🚀 Starting Deployment"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           IMAGE_TAG="latest"
@@ -1498,7 +1498,7 @@ jobs:
           
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ ROLLING DEPLOYMENT SUCCESSFUL"
+          echo "✅ DEPLOYMENT SUCCESSFUL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🌐 Application: http://localhost:$CONTAINER_PORT"
           echo "🏥 Health:      http://localhost:$CONTAINER_PORT/api/health"
