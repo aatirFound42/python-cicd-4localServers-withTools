@@ -15,12 +15,12 @@ from app.utils import (
     get_current_time,
     is_even,
     is_odd,
-    multiply_numbers,
-    square,
-    subtract_numbers,
     is_palindrome,
+    multiply_numbers,
     reverse_string,
     sort_list,
+    square,
+    subtract_numbers,
 )
 
 app = Flask(__name__)
