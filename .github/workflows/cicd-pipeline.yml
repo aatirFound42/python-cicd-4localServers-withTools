@@ -16,26 +16,6 @@ env:
   CACHE_VERSION: v1
 
 jobs:
-
-  # Add this temporary job to your workflow
-  test-secrets:
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Verify secrets
-        run: |
-          echo "Backend container: ${{ secrets.BACKEND_CONTAINER_NAME }}"
-          echo "Backend port: ${{ secrets.BACKEND_PORT }}"
-          echo "Frontend container: ${{ secrets.FRONTEND_CONTAINER_NAME }}"
-          echo "Frontend port: ${{ secrets.FRONTEND_PORT }}"
-          
-          # Check if secrets are set
-          if [ -z "${{ secrets.BACKEND_CONTAINER_NAME }}" ]; then
-            echo "❌ BACKEND_CONTAINER_NAME not set"
-            exit 1
-          fi
-          
-          echo "✅ All secrets are configured"
   
   # ====== STAGE 1: BUILD BACKEND ======
   build-backend:
@@ -452,8 +432,8 @@ jobs:
           docker pull ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }} || \
             docker pull ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
           
-          # Start services
-          docker-compose -f docker-compose.test.yml up -d
+          # Start services (using docker compose v2)
+          docker compose -f docker-compose.test.yml up -d
           
           # Wait for services
           sleep 15
@@ -472,7 +452,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker-compose -f docker-compose.test.yml down -v || true
+          docker compose -f docker-compose.test.yml down -v || true
 
   # ====== STAGE 8: DEPLOY BACKEND ======
   deploy-backend:

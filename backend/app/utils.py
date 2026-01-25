@@ -254,6 +254,7 @@ def absolute_value(n: Union[int, float]) -> Union[int, float]:
 
 # ============= STRING OPERATIONS =============
 
+
 def is_palindrome(text: str) -> bool:
     """
     Check if a string is a palindrome.
@@ -261,8 +262,9 @@ def is_palindrome(text: str) -> bool:
     """
     if not isinstance(text, str):
         raise ValueError("Input must be a string")
-    clean_text = ''.join(c.lower() for c in text if c.isalnum())
+    clean_text = "".join(c.lower() for c in text if c.isalnum())
     return clean_text == clean_text[::-1]
+
 
 def reverse_string(text: str) -> str:
     """
@@ -273,7 +275,9 @@ def reverse_string(text: str) -> str:
         raise ValueError("Input must be a string")
     return text[::-1]
 
+
 # ============= LIST OPERATIONS =============
+
 
 def sort_list(numbers: list, reverse: bool = False) -> list:
     """
@@ -281,7 +285,7 @@ def sort_list(numbers: list, reverse: bool = False) -> list:
     """
     if not isinstance(numbers, list):
         raise ValueError("Input must be a list")
-    # specific check for non-numeric elements handled by Python's sort, 
+    # specific check for non-numeric elements handled by Python's sort,
     # but we can be explicit
     if not all(isinstance(x, (int, float)) for x in numbers):
         raise ValueError("List must contain only numbers")

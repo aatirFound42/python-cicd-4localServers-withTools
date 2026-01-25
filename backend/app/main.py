@@ -20,7 +20,7 @@ from app.utils import (
     subtract_numbers,
     is_palindrome,
     reverse_string,
-    sort_list
+    sort_list,
 )
 
 app = Flask(__name__)
@@ -418,6 +418,7 @@ def echo():
 
 # ============= STRING ENDPOINTS =============
 
+
 @app.route("/api/string/palindrome", methods=["GET"])
 def check_palindrome():
     """
@@ -429,12 +430,18 @@ def check_palindrome():
         return jsonify({"error": "Parameter 'text' is required"}), 400
 
     result = is_palindrome(text)
-    return jsonify({
-        "operation": "palindrome_check",
-        "input": text,
-        "is_palindrome": result,
-        "timestamp": get_current_time()
-    }), 200
+    return (
+        jsonify(
+            {
+                "operation": "palindrome_check",
+                "input": text,
+                "is_palindrome": result,
+                "timestamp": get_current_time(),
+            }
+        ),
+        200,
+    )
+
 
 @app.route("/api/string/reverse", methods=["GET"])
 def reverse_text():
@@ -447,15 +454,21 @@ def reverse_text():
         return jsonify({"error": "Parameter 'text' is required"}), 400
 
     result = reverse_string(text)
-    return jsonify({
-        "operation": "reverse_string",
-        "input": text,
-        "result": result,
-        "timestamp": get_current_time()
-    }), 200
+    return (
+        jsonify(
+            {
+                "operation": "reverse_string",
+                "input": text,
+                "result": result,
+                "timestamp": get_current_time(),
+            }
+        ),
+        200,
+    )
 
 
 # ============= LIST ENDPOINTS =============
+
 
 @app.route("/api/list/sort", methods=["POST"])
 def sort_numbers():
@@ -466,22 +479,27 @@ def sort_numbers():
     data = request.get_json()
     if not data or "numbers" not in data:
         return jsonify({"error": "JSON body with 'numbers' list is required"}), 400
-    
+
     numbers = data["numbers"]
     reverse = data.get("reverse", False)
 
     try:
         result = sort_list(numbers, reverse)
-        return jsonify({
-            "operation": "sort_list",
-            "input": numbers,
-            "direction": "descending" if reverse else "ascending",
-            "result": result,
-            "timestamp": get_current_time()
-        }), 200
+        return (
+            jsonify(
+                {
+                    "operation": "sort_list",
+                    "input": numbers,
+                    "direction": "descending" if reverse else "ascending",
+                    "result": result,
+                    "timestamp": get_current_time(),
+                }
+            ),
+            200,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    
+
 
 # ============= ERROR HANDLERS =============
 
