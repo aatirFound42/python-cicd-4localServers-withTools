@@ -190,15 +190,21 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             TAG="pr-${{ github.event.pull_request.number }}"
           else
-            TAG="${{ github.ref_name }}"
+            # Use branch name + short SHA
+            SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+            TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-      
+
       - name: Pull Backend image
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.image-tag.outputs.tag }}"
-          docker pull "$IMAGE" 2>&1 || echo "SKIP_SCAN=true" >> $GITHUB_ENV
-      
+          if ! docker pull "$IMAGE"; then
+            echo "Image not found, using latest"
+            IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest"
+            docker pull "$IMAGE" 2>&1 || echo "SKIP_SCAN=true" >> $GITHUB_ENV
+          fi
+
       - name: Run Trivy scan
         if: env.SKIP_SCAN != 'true'
         uses: aquasecurity/trivy-action@master
@@ -247,7 +253,9 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             TAG="pr-${{ github.event.pull_request.number }}"
           else
-            TAG="${{ github.ref_name }}"
+            # Use branch name + short SHA to match GHCR image tags
+            SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+            TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
       
@@ -255,7 +263,7 @@ jobs:
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.image-tag.outputs.tag }}"
           docker pull "$IMAGE" 2>&1 || echo "SKIP_SCAN=true" >> $GITHUB_ENV
-      
+
       - name: Run Trivy scan
         if: env.SKIP_SCAN != 'true'
         uses: aquasecurity/trivy-action@master
