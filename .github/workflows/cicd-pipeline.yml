@@ -461,7 +461,7 @@ jobs:
     environment: production
     timeout-minutes: 15
     needs: [backend-quality, integration-test, scan-backend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
 
     steps:
       - name: Checkout code
@@ -538,7 +538,7 @@ jobs:
     environment: production
     timeout-minutes: 15
     needs: [frontend-quality, integration-test, scan-frontend, deploy-backend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
 
     steps:
       - name: Checkout code
