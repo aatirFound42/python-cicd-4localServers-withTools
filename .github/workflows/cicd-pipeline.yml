@@ -116,49 +116,317 @@ jobs:
           build-args: |
             REACT_APP_API_URL=/api
 
-  # ====== QUALITY CHECKS ======
-  backend-quality:
-    name: Backend Tests
+
+  # ====== STAGE 3: SCAN BACKEND IMAGE ======
+  scan-backend:
+    name: Scan Backend Image
+    if: "!contains(github.event.head_commit.message, '[skip-backend]')"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: build-backend
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set lowercase image name
+        run: |
+          echo "BACKEND_IMAGE=$(echo ${{ env.BACKEND_IMAGE }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
         with:
-          python-version: '3.9'
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Determine image tag
+        id: image-tag
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG="pr-${{ github.event.pull_request.number }}"
+          else
+            # Use branch name + short SHA
+            SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+            TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Pull Backend image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.image-tag.outputs.tag }}"
+          if ! docker pull "$IMAGE"; then
+            echo "Image not found, using latest"
+            IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest"
+            docker pull "$IMAGE" 2>&1 || echo "SKIP_SCAN=true" >> $GITHUB_ENV
+          fi
+
+      - name: Run Trivy scan
+        if: env.SKIP_SCAN != 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.image-tag.outputs.tag }}'
+          format: 'sarif'
+          output: 'trivy-backend.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+      
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: env.SKIP_SCAN != 'true'
+        with:
+          sarif_file: 'trivy-backend.sarif'
+        continue-on-error: true
+
+  # ====== STAGE 4: SCAN FRONTEND IMAGE ======
+  scan-frontend:
+    name: Scan Frontend Image
+    if: "!contains(github.event.head_commit.message, '[skip-frontend]')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-frontend
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    
+    steps:
+      - name: Set lowercase image name
+        run: |
+          echo "FRONTEND_IMAGE=$(echo ${{ env.FRONTEND_IMAGE }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Determine image tag
+        id: image-tag
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG="pr-${{ github.event.pull_request.number }}"
+          else
+            # Use branch name + short SHA to match GHCR image tags
+            SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+            TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+      
+      - name: Pull Frontend image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.image-tag.outputs.tag }}"
+          docker pull "$IMAGE" 2>&1 || echo "SKIP_SCAN=true" >> $GITHUB_ENV
+
+      - name: Run Trivy scan
+        if: env.SKIP_SCAN != 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.image-tag.outputs.tag }}'
+          format: 'sarif'
+          output: 'trivy-frontend.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+      
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: env.SKIP_SCAN != 'true'
+        with:
+          sarif_file: 'trivy-frontend.sarif'
+        continue-on-error: true
+
+  # ====== STAGE 5: BACKEND LINT & TEST ======
+  backend-quality:
+    name: Backend Quality Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build-backend
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
           cache-dependency-path: 'backend/requirements.txt'
-      - working-directory: ./backend
+      
+      - name: Install dependencies
+        working-directory: ./backend
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
-          pytest tests/ -v || true
+          pip install black isort flake8 pylint pytest pytest-cov bandit
+      
+      - name: Run Black
+        working-directory: ./backend
+        run: black --check app/ tests/ --line-length=100 --diff
+      
+      - name: Run isort
+        working-directory: ./backend
+        run: isort --check-only --diff app/ tests/ --profile black
+      
+      - name: Run Flake8
+        working-directory: ./backend
+        run: flake8 app/ tests/ --max-line-length=100
+      
+      - name: Run Pylint
+        working-directory: ./backend
+        run: pylint app/ tests/ --fail-under=8.0
+        continue-on-error: true
+      
+      - name: Run tests with coverage
+        working-directory: ./backend
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml --cov-report=html --cov-report=term-missing
+      
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/htmlcov/
+      
+      - name: Run Bandit security scan
+        working-directory: ./backend
+        run: bandit -r app/ -f json -o bandit-report.json || true
         continue-on-error: true
 
+  # ====== STAGE 6: FRONTEND LINT & TEST ======
   frontend-quality:
-    name: Frontend Tests
+    name: Frontend Quality Checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: build-frontend
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: 'client/package-lock.json'
-      - working-directory: ./client
-        run: |
-          npm ci
-          npm run build
+      
+      - name: Install dependencies
+        working-directory: ./client
+        run: npm ci
+      
+      - name: Run ESLint
+        working-directory: ./client
+        run: npm run lint || true
         continue-on-error: true
+      
+      - name: Run tests
+        working-directory: ./client
+        run: npm test -- --coverage --watchAll=false || true
+        continue-on-error: true
+      
+      - name: Build frontend
+        working-directory: ./client
+        run: npm run build
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: client/build/
 
-  # ====== DEPLOY BACKEND ======
+  # ====== STAGE 7: INTEGRATION TESTS ======
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build-backend, build-frontend]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set lowercase image names
+        run: |
+          echo "BACKEND_IMAGE=$(echo ${{ env.BACKEND_IMAGE }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "FRONTEND_IMAGE=$(echo ${{ env.FRONTEND_IMAGE }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Start services with docker-compose
+        run: |
+          # Create temporary docker-compose for testing
+          cat > docker-compose.test.yml << 'EOF'
+          version: '3.8'
+          services:
+            backend:
+              image: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ github.ref_name }}
+              ports:
+                - "5000:5000"
+              environment:
+                - FLASK_ENV=testing
+              networks:
+                - test-network
+            
+            frontend:
+              image: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }}
+              ports:
+                - "3000:80"
+              depends_on:
+                - backend
+              networks:
+                - test-network
+          
+          networks:
+            test-network:
+              driver: bridge
+          EOF
+          
+          # Pull images
+          docker pull ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ github.ref_name }} || \
+            docker pull ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest
+          
+          docker pull ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }} || \
+            docker pull ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
+          
+          # Start services (using docker compose v2)
+          docker compose -f docker-compose.test.yml up -d
+          
+          # Wait for services
+          sleep 15
+      
+      - name: Run integration tests
+        run: |
+          echo "Testing Backend API..."
+          curl -f http://localhost:5000/api/health || exit 1
+          curl -f http://localhost:5000/ || exit 1
+          
+          echo "Testing Frontend..."
+          curl -f http://localhost:3000/ || exit 1
+          
+          echo "✅ All integration tests passed"
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f docker-compose.test.yml down -v || true
+
+
   # ====== DEPLOY BACKEND ======
   deploy-backend:
     name: Deploy Backend
     runs-on: self-hosted
     environment: production
-    needs: [backend-quality]
+    needs: [backend-quality, integration-test, scan-backend]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     
     steps:
@@ -201,7 +469,7 @@ jobs:
     name: Deploy Frontend
     runs-on: self-hosted
     environment: production
-    needs: [frontend-quality, deploy-backend]
+    needs: [frontend-quality, integration-test, scan-frontend, deploy-backend]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     
     steps:
@@ -242,6 +510,31 @@ jobs:
           docker ps --filter "name=cicd-"
           docker network inspect cicd-network
 
+  # ====== FINAL STAGE: NOTIFICATION ======
+  notify:
+    name: Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, deploy-frontend]
+    if: always()
+    
+    steps:
+      - name: Pipeline Summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Full-Stack Pipeline Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Backend Deploy:  ${{ needs.deploy-backend.result }}"
+          echo "Frontend Deploy: ${{ needs.deploy-frontend.result }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ "${{ needs.deploy-backend.result }}" = "success" ] && \
+             [ "${{ needs.deploy-frontend.result }}" = "success" ]; then
+            echo "✅ DEPLOYMENT SUCCESSFUL"
+            exit 0
+          else
+            echo "❌ DEPLOYMENT FAILED"
+            exit 1
+          fi
 
 concurrency:
   group: deploy-${{ github.ref }}
