@@ -1,6 +1,6 @@
 // API configuration
-// This gets replaced at build time via REACT_APP_API_URL environment variable
-export const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+// Use /api prefix - nginx will proxy to backend
+export const API_BASE_URL = process.env.REACT_APP_API_URL || "/api";
 
 // Log the API URL in development for debugging
 if (process.env.NODE_ENV === 'development') {

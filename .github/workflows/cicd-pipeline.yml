@@ -114,7 +114,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            REACT_APP_API_URL=http://${{ secrets.VM_IP }}:5000
+            REACT_APP_API_URL=/api
 
   # ====== QUALITY CHECKS ======
   backend-quality:
@@ -211,10 +211,11 @@ jobs:
           # Pull latest image
           docker pull ghcr.io/aatirfound42/python-cicd-4localservers-withtools/frontend:latest
           
-          # Start new container
+          # Start new container with network link to backend
           docker run -d \
             --name cicd-frontend \
             -p 3000:80 \
+            --add-host=host.docker.internal:host-gateway \
             --restart unless-stopped \
             ghcr.io/aatirfound42/python-cicd-4localservers-withtools/frontend:latest
           

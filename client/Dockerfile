@@ -28,7 +28,7 @@ LABEL description="React frontend for Python CI/CD learning project"
 # Copy built assets from builder stage
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# Create custom nginx config
+# Create custom nginx config with API proxy
 RUN cat > /etc/nginx/conf.d/default.conf <<'EOF'
 server {
     listen 80;
@@ -41,6 +41,20 @@ server {
     location / {
         try_files $uri $uri/ /index.html;
         add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+    
+    # Proxy API requests to backend
+    location /api {
+        # Remove /api prefix and forward to backend
+        rewrite ^/api/(.*) /$1 break;
+        proxy_pass http://localhost:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache_bypass $http_upgrade;
     }
     
     # Security headers
