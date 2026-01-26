@@ -8,7 +8,7 @@ function StringCard() {
   const handleAction = async (endpoint) => {
     if (!text) return;
     try {
-      const res = await fetch(`${API_BASE_URL}/api/string/${endpoint}?text=${encodeURIComponent(text)}`);
+      const res = await fetch(`${API_BASE_URL}/string/${endpoint}?text=${encodeURIComponent(text)}`);
       const data = await res.json();
       setResult(data);
     } catch (error) {

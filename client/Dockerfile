@@ -43,11 +43,9 @@ server {
         add_header Cache-Control "no-cache, no-store, must-revalidate";
     }
     
-    # Proxy API requests to backend
-    location /api {
-        # Remove /api prefix and forward to backend
-        rewrite ^/api/(.*) /$1 break;
-        proxy_pass http://localhost:5000;
+    # Proxy API requests to backend container
+    location /api/ {
+        proxy_pass http://cicd-backend:5000/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';

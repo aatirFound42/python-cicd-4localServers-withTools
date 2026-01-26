@@ -16,7 +16,7 @@ function Dashboard() {
   const { theme, toggleTheme } = useContext(ThemeContext);
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/health`)
+    fetch(`${API_BASE_URL}/health`)
       .then(res => res.json())
       .then(data => setHealth(data))
       .catch(() => setHealth({ status: 'down' }));

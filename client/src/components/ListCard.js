@@ -17,7 +17,7 @@ function ListCard() {
     }
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/list/sort`, {
+      const res = await fetch(`${API_BASE_URL}/list/sort`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ numbers: numbersArray, reverse: reverse })

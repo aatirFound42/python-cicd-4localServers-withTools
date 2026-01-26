@@ -8,7 +8,7 @@ function ParityCard() {
   const checkParity = async () => {
     if (!n) return;
     try {
-      const res = await fetch(`${API_BASE_URL}/api/parity/${n}`);
+      const res = await fetch(`${API_BASE_URL}/parity/${n}`);
       const json = await res.json();
       setData(json);
     } catch (error) {

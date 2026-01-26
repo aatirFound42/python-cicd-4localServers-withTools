@@ -8,7 +8,7 @@ function CalculatorCard() {
 
   const calculate = async (operation) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/${operation}?a=${a}&b=${b}`);
+      const res = await fetch(`${API_BASE_URL}/${operation}?a=${a}&b=${b}`);
       const data = await res.json();
       setResult(data);
     } catch (error) {

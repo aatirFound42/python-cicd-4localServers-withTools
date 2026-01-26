@@ -7,7 +7,7 @@ function UtilityCard() {
 
   const calculate = async (operation) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/${operation}?n=${n}`);
+      const res = await fetch(`${API_BASE_URL}/${operation}?n=${n}`);
       const data = await res.json();
       setResult(data);
     } catch (error) {
