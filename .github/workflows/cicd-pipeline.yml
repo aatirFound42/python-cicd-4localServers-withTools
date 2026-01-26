@@ -153,6 +153,7 @@ jobs:
         continue-on-error: true
 
   # ====== DEPLOY BACKEND ======
+  # ====== DEPLOY BACKEND ======
   deploy-backend:
     name: Deploy Backend
     runs-on: self-hosted
@@ -165,6 +166,10 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
+      - name: Create Docker network if it doesn't exist
+        run: |
+          docker network create cicd-network 2>/dev/null || true
+
       - name: Deploy Backend
         run: |
           # Stop old container
@@ -174,9 +179,10 @@ jobs:
           # Pull latest image
           docker pull ghcr.io/aatirfound42/python-cicd-4localservers-withtools/backend:latest
           
-          # Start new container
+          # Start new container on custom network
           docker run -d \
             --name cicd-backend \
+            --network cicd-network \
             -p 5000:5000 \
             -e FLASK_ENV=production \
             -e FLASK_APP=app/main.py \
@@ -189,6 +195,7 @@ jobs:
           curl -f http://localhost:5000/api/health || exit 1
           echo "✅ Backend deployed successfully"
 
+  # ====== DEPLOY FRONTEND ======
   # ====== DEPLOY FRONTEND ======
   deploy-frontend:
     name: Deploy Frontend
@@ -211,11 +218,11 @@ jobs:
           # Pull latest image
           docker pull ghcr.io/aatirfound42/python-cicd-4localservers-withtools/frontend:latest
           
-          # Start new container with network link to backend
+          # Start new container on the same network as backend
           docker run -d \
             --name cicd-frontend \
+            --network cicd-network \
             -p 3000:80 \
-            --add-host=host.docker.internal:host-gateway \
             --restart unless-stopped \
             ghcr.io/aatirfound42/python-cicd-4localservers-withtools/frontend:latest
           
@@ -229,10 +236,12 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Deployment Complete!"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Backend:  http://${{ secrets.VM_IP }}:5000"
-          echo "Frontend: http://${{ secrets.VM_IP }}:3000"
+          echo "Backend:  http://localhost:5000"
+          echo "Frontend: http://localhost:3000"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           docker ps --filter "name=cicd-"
+          docker network inspect cicd-network
+
 
 concurrency:
   group: deploy-${{ github.ref }}
