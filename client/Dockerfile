@@ -45,7 +45,7 @@ server {
     
     # Proxy API requests to backend container
     location /api/ {
-        proxy_pass http://cicd-backend:5000/;
+        proxy_pass http://cicd-backend:5000;  # Remove trailing slash
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -54,7 +54,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_cache_bypass $http_upgrade;
     }
-    
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
