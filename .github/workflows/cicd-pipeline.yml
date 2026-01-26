@@ -228,8 +228,8 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Deployment Complete!"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Backend:  http://localhost:5000"
-          echo "Frontend: http://localhost:3000"
+          echo "Backend:  http://${{ secrets.VM_IP }}:5000"
+          echo "Frontend: http://${{ secrets.VM_IP }}:3000"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           docker ps --filter "name=cicd-"
 
