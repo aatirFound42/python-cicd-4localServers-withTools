@@ -1,21 +1,30 @@
 version: 2
 updates:
-  # Security updates for pip (daily)
+  # ====== BACKEND DEPENDENCIES ======
+  
+  # Backend security updates (daily)
   - package-ecosystem: "pip"
-    directory: "/"
+    directory: "/backend"
     schedule:
       interval: "daily"
     open-pull-requests-limit: 5
     commit-message:
-      prefix: "security"
+      prefix: "security(backend)"
     labels:
       - "dependencies"
       - "security"
+      - "backend"
       - "priority-high"
+    groups:
+      security-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
   
-  # Regular pip dependency updates (weekly)
+  # Backend regular updates (weekly)
   - package-ecosystem: "pip"
-    directory: "/"
+    directory: "/backend"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -23,16 +32,87 @@ updates:
       timezone: "Asia/Kolkata"
     open-pull-requests-limit: 10
     commit-message:
-      prefix: "deps"
-      prefix-development: "deps-dev"
+      prefix: "deps(backend)"
+      prefix-development: "deps-dev(backend)"
     versioning-strategy: increase
-    # Remove reviewers or replace with actual GitHub usernames/teams
-    # reviewers:
-    #   - "your-github-username"
-    #   - "yourorg/your-team"
     labels:
       - "dependencies"
       - "python"
+      - "backend"
+    groups:
+      production-dependencies:
+        patterns:
+          - "flask*"
+          - "prometheus*"
+        update-types:
+          - "minor"
+          - "patch"
+      development-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+  
+  # ====== FRONTEND DEPENDENCIES ======
+  
+  # Frontend npm security updates (daily)
+  - package-ecosystem: "npm"
+    directory: "/client"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "security(frontend)"
+    labels:
+      - "dependencies"
+      - "security"
+      - "frontend"
+      - "priority-high"
+    groups:
+      security-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+  
+  # Frontend npm regular updates (weekly)
+  - package-ecosystem: "npm"
+    directory: "/client"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(frontend)"
+      prefix-development: "deps-dev(frontend)"
+    versioning-strategy: increase
+    labels:
+      - "dependencies"
+      - "npm"
+      - "frontend"
+    groups:
+      react-ecosystem:
+        patterns:
+          - "react*"
+          - "@testing-library/*"
+        update-types:
+          - "minor"
+          - "patch"
+      development-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Ignore major version updates for React (manual review needed)
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+  
+  # ====== INFRASTRUCTURE ======
   
   # GitHub Actions updates (weekly)
   - package-ecosystem: "github-actions"
@@ -49,8 +129,57 @@ updates:
       - "dependencies"
       - "github-actions"
       - "ci-cd"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
   
-  # Docker updates (weekly)
+  # Backend Docker updates (weekly)
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker(backend)"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "backend"
+      - "infrastructure"
+    ignore:
+      # Pin to Python 3.9 for now
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major"]
+  
+  # Frontend Docker updates (weekly)
+  - package-ecosystem: "docker"
+    directory: "/client"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker(frontend)"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "frontend"
+      - "infrastructure"
+    ignore:
+      # Pin to Node 18 for now
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+  
+  # Docker Compose (root level)
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -58,7 +187,7 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "Asia/Kolkata"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "docker"
     labels:

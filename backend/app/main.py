@@ -15,7 +15,10 @@ from app.utils import (
     get_current_time,
     is_even,
     is_odd,
+    is_palindrome,
     multiply_numbers,
+    reverse_string,
+    sort_list,
     square,
     subtract_numbers,
 )
@@ -413,6 +416,91 @@ def echo():
     return jsonify({"operation": "echo", "message": message, "timestamp": get_current_time()}), 200
 
 
+# ============= STRING ENDPOINTS =============
+
+
+@app.route("/api/string/palindrome", methods=["GET"])
+def check_palindrome():
+    """
+    Check if text is a palindrome.
+    Query Param: text
+    """
+    text = request.args.get("text")
+    if text is None:
+        return jsonify({"error": "Parameter 'text' is required"}), 400
+
+    result = is_palindrome(text)
+    return (
+        jsonify(
+            {
+                "operation": "palindrome_check",
+                "input": text,
+                "is_palindrome": result,
+                "timestamp": get_current_time(),
+            }
+        ),
+        200,
+    )
+
+
+@app.route("/api/string/reverse", methods=["GET"])
+def reverse_text():
+    """
+    Reverse the input text.
+    Query Param: text
+    """
+    text = request.args.get("text")
+    if text is None:
+        return jsonify({"error": "Parameter 'text' is required"}), 400
+
+    result = reverse_string(text)
+    return (
+        jsonify(
+            {
+                "operation": "reverse_string",
+                "input": text,
+                "result": result,
+                "timestamp": get_current_time(),
+            }
+        ),
+        200,
+    )
+
+
+# ============= LIST ENDPOINTS =============
+
+
+@app.route("/api/list/sort", methods=["POST"])
+def sort_numbers():
+    """
+    Sort a list of numbers.
+    Body: {"numbers": [3, 1, 4], "reverse": true/false}
+    """
+    data = request.get_json()
+    if not data or "numbers" not in data:
+        return jsonify({"error": "JSON body with 'numbers' list is required"}), 400
+
+    numbers = data["numbers"]
+    reverse = data.get("reverse", False)
+
+    try:
+        result = sort_list(numbers, reverse)
+        return (
+            jsonify(
+                {
+                    "operation": "sort_list",
+                    "input": numbers,
+                    "direction": "descending" if reverse else "ascending",
+                    "result": result,
+                    "timestamp": get_current_time(),
+                }
+            ),
+            200,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 # ============= ERROR HANDLERS =============
 
 
@@ -470,6 +558,6 @@ if __name__ == "__main__":
     import os
 
     host = os.getenv("FLASK_HOST", "127.0.0.1")
-    port = int(os.getenv("FLASK_PORT", "5000"))
+    port = int(os.getenv("FLASK_PORT", "8000"))
     debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
     app.run(host=host, port=port, debug=debug)
